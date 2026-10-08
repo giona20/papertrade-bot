@@ -1,0 +1,224 @@
+# =====================================================================
+#  PAPERTRADE BOT — configurazione
+#  Ogni parametro è spiegato in GUIDA.md (sezione "Parametri").
+# =====================================================================
+
+mode: dry_run              # dry_run = simula gli ordini | live = ordini veri (richiede ABI, vedi onchain)
+market_source: hyperliquid # hyperliquid = prezzi reali | sim = prezzi simulati (test offline)
+protocol_source: sim       # onchain = stato reale del contratto (dal 10/10) | sim = LP simulata
+timezone: Europe/Rome
+launch_time: "2026-10-10T00:00:00+00:00"   # FASE 1: trading live (annuncio "10.10.2026 00:00"; se UTC = 02:00 Roma)
+phases:
+  predeposit_time: "2026-10-08T00:00:00+00:00"  # FASE 0: solo depositi + creazione account (ora esatta da confermare)
+  open_contract_time: ""     # FASE 2: contratto aperto a tutti (bot live possibile). Compila quando annunciato
+  transferable_time: ""      # FASE 4: PAPER trasferibile (acquisto/vendita). Compila quando annunciato
+
+fees:                        # CONFERMATO dai docs: l'utente non paga fee. L'1% builder esce dalla quota LP
+  frontend_rate: 0.0
+  frontend_base: margin      # irrilevante con rate 0
+  charged_on_liquidation: false
+
+congestion:                  # modello di ritardo del relayer (fase 1)
+  enabled_phases: [1]
+  base_delay_s: 20           # ritardo medio di conferma
+  small_notional_usd: 1000   # sotto questo nozionale priorità bassa
+  small_extra_delay_s: 90
+  rush_base_delay_s: 120     # durante la corsa le conferme sono molto più lente
+  intent_ttl_s: 3600         # docs: ogni intent firmato vale 1 ora, poi scade
+assets: [BTC, ETH]          # docs: al lancio solo BTC ed ETH, fino a 1000x. Aggiungi altri quando listati
+db_path: data/papertrade.db
+kill_file: KILL            # se esiste questo file il bot chiude tutto e si ferma
+
+loops:
+  fast_seconds: 2          # controllo posizioni (TP / SL / liquidazione)
+  slow_seconds: 60         # stato protocollo, regime, strategie
+
+thresholds:
+  emission_decay_usd: 2000000   # sotto: 100 PAPER per $1 di perdita (anche con LP negativa)
+  tail_decay_scale_usd: 120000000  # docs: sopra soglia emissione = 100 × (S/(S+H))², H = guadagno LP cumulato oltre $2M
+  loss_fee_lp: 0.02             # docs: fee del 2% sulle perdite, presa dal lato LP (non dall'utente). Base del mint = perdita − 2% se solvente
+  sweep_usd: 5000000            # sopra: tutto il guadagno LP extra va agli staker
+  drain_drop_pct: 0.30          # calo dell'LP dal massimo che attiva il flag drenaggio
+  drain_mode: opportunistic     # defensive = spegne S1/S3 | opportunistic = continua a coniare (sotto $2M l'emissione
+                                # torna a 100/$), blocca solo gli acquisti di PAPER
+
+wallets:                    # PAPER non è trasferibile fino alla fase 4: resta nel wallet che lo conia
+  A: {role: "corsa / acquisto PAPER", deposit_usd: 500, address: ""}
+  B: {role: "trading lato long", deposit_usd: 500, address: ""}       # il tuo wallet long
+  C: {role: "trading lato short", deposit_usd: 500, address: ""}      # il tuo wallet short
+  # riserva: NON depositare, non collegare mai al sito
+strategy_wallets:           # stesso account = niente long e short sullo stesso asset
+  RUSH: A
+  long: B
+  short: C
+
+capital:
+  trading_budget_usd: 500       # somma dei wallet B + C
+  daily_loss_cap_usd: 100       # stop giornaliero (giornata = ora di Roma), esclusa la corsa
+  max_margin_per_trade_usd: 25
+  max_open_positions: 8       # le coppie occupano 2 posti
+  max_idle_on_contract_usd: 100 # oltre questa cifra ferma sul contratto → alert "ritira"
+
+leverage:
+  max: 1000
+  min: 10
+  liq_buffer: 0.0005        # docs: la liquidazione scatta ~5 bps prima dell'azzeramento → distanza = 1/leva − 0,05%
+  noise_multiple: 2.0       # la distanza di liquidazione deve essere ≥ k × volatilità attesa nel periodo
+
+haircut:                    # formula ufficiale: h = 1 − (1−b)·move/(move+K), deadband 0,2 bps (vedi ptbot/haircut.py)
+  target_max: 0.35          # curva on-chain (ipotesi): ~3% di movimento → trattenuta ~33%, ciclo ~1 giorno
+  min_samples: 3            # con 3 chiusure a distanze diverse la curva è stimata
+  base_rate: 0.1            # IPOTESI dai valori di instruments(): baseRate 0,1, K = 1/15000 + 100000/1e7 ≈ 0,0101
+  k: 0.0100667              # → trattenuta ~92% a 0,1%, 79% a 0,3%, 55% a 1%, 40% a 2%, 25% a 5%, 18% a 10%
+
+paper:
+  liquidity_discount: 0.30  # sconto sul prezzo PAPER per vendita/slippage
+  implied_required_yield: 1.0     # PAPER non trasferibile: valore implicito = ricompense annue per token / 100%
+  nontransferable_discount: 0.50  # ulteriore sconto perché non vendibile
+  dilution_horizon_days: 90       # valore implicito: ricompense divise per la supply attesa tra 90 giorni al ritmo di conio attuale
+  target_apr: 0.30          # rendimento staking minimo per comprare PAPER
+  claim_min_usd: 5          # soglia per fare claim delle ricompense
+  # --- vendita (solo fase 4) ---
+  sell_apr: 0.15            # APR al prezzo di mercato sotto questa soglia = PAPER caro rispetto ai flussi → vendi
+  prepare_unstake_apr: 0.20 # sotto questa soglia avvia l'unstake se c'è un periodo di attesa
+  recoup_multiple: 2.0      # se prezzo ≥ 2× costo medio: vendi quanto basta a recuperare il capitale speso
+  unstake_wait_hours: 0     # docs: stake e unstake istantanei, nessun cooldown
+  queue_pay_prob:           # probabilità stimata che un profitto in coda venga pagato
+    INSOLVENTE: 0.90        # il saldo in coda è usabile come collaterale per nuove aperture
+    BOOTSTRAP: 0.95
+    DECADIMENTO: 1.0
+    SWEEP: 1.0
+
+rush:                       # MODALITÀ CORSA: prima ora dopo il lancio (liquidazioni volute per coniare PAPER)
+  enabled: true
+  expected_minutes: 60      # ipotesi: la corsa porta l'LP oltre $2M in circa 1 ora
+  max_minutes: 120          # oltre questo tempo la corsa si considera finita comunque
+  budget_usd: 150           # con la curva on-chain la corsa costa quasi come il burn (~$0,0085/PAPER): budget ridotto
+  mode: auto                # pairs = coppie delta neutral su B (long) e C (short) | burn = liquidazioni singole su A
+                            # auto = coppie, salvo emissione in calo veloce (vedi burn_if_emission_drop)
+  margin_usd: 10            # margine per ordine (per gamba nelle coppie)
+  leverage: 1000            # leva massima (burn); nelle coppie è il tetto
+  pair_target_minutes: 30   # coppie: distanza = movimento atteso in ~30 min (test scenari: miglior costo/rischio)
+  pair_min_distance: 0.0010 # coppie: distanza minima 0,10%
+  burn_if_emission_drop: 0.30   # auto: passa a burn se l'emissione calerebbe >30% durante un ciclo coppia
+  max_open: 8               # ordini aperti + in attesa contemporaneamente (gambe)
+  min_emission: 95          # la corsa finisce quando l'emissione scende sotto 95 PAPER/$ (≈ LP $5,1M)
+  cancel_buffer_s: 120      # annulla gli ordini in attesa se la soglia arriva prima della conferma + buffer
+  slow_seconds: 10          # durante la corsa lo stato si aggiorna ogni 10 secondi
+  rate_window_min: 10       # finestra per misurare la velocità di crescita dell'LP
+
+strategies:
+  early:                    # S1 — finestra di lancio
+    enabled: false          # test scenari: stesso costo per PAPER di S3 ma scenario peggiore ~2× → spento
+    days_from_launch: 7
+    margin_usd: 15          # ~90x → nozionale ~$1.350: sopra la soglia "piccolo" del relayer
+    max_hold_minutes: 720
+    breakout_lookback_min: 30
+  catalyst:                 # S2 — eventi macro / notizie
+    enabled: false          # test scenari: contributo leggermente negativo. Attivalo solo per eventi grandi, con dati reali
+    events_file: events.yaml
+    margin_usd: 20
+    open_minutes_before: 30
+    close_minutes_after: 45
+    liq_fraction_of_move: 0.35  # distanza di liquidazione = 35% del movimento atteso
+    tp_fraction_of_move: 1.2    # TP della gamba vincente = 120% del movimento atteso
+  farming:                  # S3 — farming continuo di PAPER
+    enabled: true
+    mode: price             # price = conia finché il costo stimato per PAPER ≤ max_cost_per_paper
+                            # ev    = solo se l'EV con il valore PAPER stimato è ≥ min_ev_per_margin
+    max_cost_per_paper: 0.004   # il prezzo massimo che accetti di pagare per un PAPER
+    use_pairs: true         # coppie delta neutral (B long + C short): stesso costo atteso, molta meno varianza
+    margin_usd: 25          # test scenari: costo per PAPER più basso, PAPER aggiuntivi a ~$0,001–0,003
+    min_ev_per_margin: 0.05
+    max_hold_minutes: 720
+
+crowd:                      # posizionamento della folla (OI long vs short per asset, se leggibile dal contratto)
+  enabled: true
+  skew_ratio: 1.5           # lato dominante ≥ 1,5× l'altro → apri dal lato opposto alla folla
+
+instrument_ids: {BTC: 0, ETH: 1}   # docs: indici HyperCore su chain 999. Verifica gli ID strumento di Papertrade
+
+queue_recycle:              # docs: il saldo in coda è collaterale; perdere con esso conia PAPER sul credito distrutto
+  enabled: true
+  min_queued_usd: 20        # sotto questa cifra non vale la pena
+  min_queue_len: 5          # coda abbastanza lunga da rendere il credito lento da incassare
+
+queue_guard:                # chiusura anticipata dei trade in profitto per non finire in coda
+  enabled: true
+  coverage_min: 3.0         # LP libera deve essere ≥ 3× i tuoi profitti netti aperti (o di tutti, se leggibile)
+  buffer_s: 120             # margine oltre al tempo di conferma della chiusura
+  min_gain_usd: 1.0         # sotto questo profitto non vale la pena
+
+risk:
+  max_spread_bps: 10        # spread BBO su Hyperliquid oltre il quale non si apre
+  max_oracle_div_bps: 15    # divergenza mid vs oracle Hyperliquid
+  stale_seconds: 30         # dati più vecchi = stop aperture
+  max_queue_growth_1h: 0.50 # coda cresciuta >50% in 1h = alert
+
+alerts:
+  telegram_token: ""
+  telegram_chat_id: ""
+
+onchain:                    # contratti NON verificati: il bot costruisce da solo l'ABI minimo dei getter
+  rpc_url: "https://rpc.hyperliquid.xyz/evm"
+  contract_address: "0x6cd5661646289FB6E65EA5C032310fDEd797D0a2"   # Exchange (proxy EIP-1967)
+  contracts:
+    exchange: "0x6cd5661646289FB6E65EA5C032310fDEd797D0a2"   # impl 0x0F3feBFc94876b0C895F7aceCDc8F5c863b549EE
+    tokenomics: "0x75174549dbBD44497D31a47E2E2D7406408d63D9"
+    oracle: "0xa9B4c7b7Ca5835652d81E25739c870D49F39cC2e"
+    session_keys: "0x8326Eb8896e358717f10502Ec73CE8D28E37B108"
+    staking: "0xAAd6c7b0CC3014FC80FfEDAe0Ed7Ce5967b0F016"   # da paper.stakingContract
+    paper: "0xe40f17915DAa230324030003A197cdAEf2261C0e"   # PAPER (da tokenomics.paperToken)
+  # altri indirizzi: factory 0x1629b7D46bef6E13FF754174FC9F32dEa309b38F, deployer 0xa1763a5Ff94eBdDd417CCCb906622Ec762ab2e29,
+  # keeper 0xdF1BdA875C9393a663CE69bf6A7FbAA73dFD053D, owner 0xB915Fa41e824D6aA31BB833Ee81220C0F2c8EA0F,
+  # pauseGuardian 0x696292762fD5AC3677a45EdBe54EAECE4194d1F6, marketKeeper 0x3721476DE31190DC1AF8908026abe20efE25cf99
+  usd_decimals: 18          # verificato: balances() = 748800000000000000000 per $748,80
+  # instruments(uint32) — 8 valori letti l'8/10 (BTC=0, ETH=1), interpretazione PROVVISORIA:
+  #   [0] 15000      → rateMultiplier?          [4] 10.000.000 → positionMultiplier? (o tetto per utente $10M)
+  #   [1] 814,6/484,0 → ? (diverso per asset)   [5] 0,000476/0,000481 → buffer liquidazione (~4,8 bps, docs: ~5)
+  #   [2] 0/1        → indice asset Hyperliquid [6] 0,1  → baseRate?
+  #   [3] 1000       → leva massima             [7] 100.000 → referenceNotional
+  # marketOi(0): [3]=[4]=59,998 BTC → tetti OI long/short (~$5M al prezzo attuale)
+  # fee: winFeeRate = lossFeeRate = liquidationFeeRate = 2% (carve lato LP, l'utente non paga)
+  paper_decimals: 18
+  my_address: ""            # il tuo wallet principale (es. B)
+  functions:                # formato "contratto:nome"
+    lp_balance: "exchange:treasury"
+    side_bucket: "exchange:sideBucket"
+    my_balance: "exchange:balances"
+    queue_total: "exchange:totalQueued"
+    queue_length: ""
+    tracked_lp: "tokenomics:trackedLpUsd"   # LP vera (0 al lancio); treasury NON è l'LP
+    tail_progress: "tokenomics:tailProgressUsd"
+    paper_supply: "paper:totalSupply"
+    paper_staked: "paper:balanceOf@staking"   # PAPER depositati nel contratto di staking
+    my_paper: "paper:balanceOf"
+    my_staked: ""
+    my_pending_rewards: "staking:pendingReward"   # nome dai docs; verifica con check-onchain
+    my_queued: "exchange:userQueuedTotal"
+    oi_long: "exchange:marketOi(uint32)#0"    # da verificare a mercato aperto (ora 0)
+    oi_short: "exchange:marketOi(uint32)#1"
+    hc_base_rate: ""
+    hc_rate_multiplier: ""
+    hc_position_multiplier: ""
+    hc_reference_notional: ""
+    open_pnl_total: ""
+
+sim:                        # solo per test offline
+  seed: 7
+  crowd_net_to_lp_per_hour: 25000   # perdita netta media della folla verso l'LP
+  crowd_sd_per_hour: 60000
+  whale_prob_per_hour: 0.01
+  whale_win_usd: 1500000
+  staker_share_of_carve: 0.75       # ipotesi: quota della carve LP (2%) che va agli staker; il resto dev/builder
+  win_carve: 0.02                   # ipotesi: carve analoga sulla trattenuta trattenuta dalle vincite
+  crowd_stake_ratio: 0.60
+  paper_listing_after_hours: 60   # in sim = fase 4 (PAPER trasferibile)
+  open_contract_after_hours: 24   # in sim = fase 2
+  rush_loss_per_hour: 2000000     # perdite volute della folla durante la corsa
+  rush_minutes: 90
+  market_required_yield: 1.50   # prudente: il mercato chiede 150% di rendimento
+  event_every_hours: 12
+  event_move_bps: 80
+  true_base_rate: 0.1               # parametri "veri" della simulazione = ipotesi dai valori on-chain
+  true_k: 0.0100667

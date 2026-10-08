@@ -1,0 +1,2 @@
+streamlit>=1.46   # st.fragment(run_every) e width="stretch"
+pandas>=2.0

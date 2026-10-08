@@ -1,0 +1,4 @@
+pyyaml>=6.0
+requests>=2.31
+tzdata>=2024.1   # fusi orari (necessario su Windows)
+web3>=6.0        # serve solo con protocol_source: onchain
