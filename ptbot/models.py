@@ -1,4 +1,4 @@
-"""Strutture dati del bot."""
+"""Bot data structures."""
 from __future__ import annotations
 
 import math
@@ -26,8 +26,8 @@ class MarketSnapshot:
     ask: float
     mark: Optional[float]
     oracle: Optional[float]
-    vol_1m: float          # deviazione standard dei rendimenti a 1 minuto (frazione)
-    range_high: float      # massimo della finestra di breakout (esclusa candela corrente)
+    vol_1m: float          # standard deviation of 1-minute returns (fraction)
+    range_high: float      # high of the breakout window (current candle excluded)
     range_low: float
     ts: float
 
@@ -61,13 +61,13 @@ class ProtocolState:
     my_staked: float = 0.0
     my_pending_rewards: float = 0.0
     my_queued_usd: float = 0.0
-    open_pnl_total: Optional[float] = None   # PnL aperto aggregato dei trader, se leggibile
-    oi: Optional[dict] = None                # {asset: (oi_long_usd, oi_short_usd)}, se leggibile
-    paper_minted_24h: float = 0.0            # PAPER coniati nelle ultime 24h (per la diluizione)
+    open_pnl_total: Optional[float] = None   # aggregate open PnL of all traders, if readable
+    oi: Optional[dict] = None                # {asset: (oi_long_usd, oi_short_usd)}, if readable
+    paper_minted_24h: float = 0.0            # PAPER minted in the last 24h (for dilution)
 
     @property
     def effective_lp(self) -> float:
-        """LP al netto dei debiti in coda: è il numero che decide il regime."""
+        """LP net of queued debt: the number that decides the regime."""
         return self.lp_usd - self.queue_usd
 
     @property
@@ -84,8 +84,8 @@ class Intent:
     side: str              # long | short
     margin: float
     leverage: float
-    tp_move: float         # movimento favorevole per il take profit (frazione)
-    sl_move: float         # movimento avverso per lo stop (frazione, ≤ distanza di liquidazione)
+    tp_move: float         # favourable move for the take profit (fraction)
+    sl_move: float         # adverse move for the stop (fraction, ≤ liquidation distance)
     max_hold_min: float
     reason: str
     group: str = ""
@@ -116,7 +116,7 @@ class Position:
     queued_usd: float = 0.0
     haircut: Optional[float] = None
     close_reason: str = ""
-    pending_close_ts: Optional[float] = None   # chiusura richiesta, in attesa del relayer
+    pending_close_ts: Optional[float] = None   # close requested, waiting for the relayer
     pending_why: str = ""
     wallet: str = ""
 
@@ -126,7 +126,7 @@ class Position:
 
 
 def bar_stats(bars: list, lookback: int) -> tuple[float, float, float]:
-    """bars = [(high, low, close)]. Ritorna (vol_1m, high, low) della finestra precedente."""
+    """bars = [(high, low, close)]. Returns (vol_1m, high, low) of the previous window."""
     closes = [b[2] for b in bars[-61:]]
     if len(closes) >= 3:
         rets = [math.log(closes[i] / closes[i - 1]) for i in range(1, len(closes)) if closes[i - 1] > 0]
@@ -140,10 +140,10 @@ def bar_stats(bars: list, lookback: int) -> tuple[float, float, float]:
 
 
 def liq_distance(lev: float, buffer: float = 0.0005) -> float:
-    """Docs: la liquidazione (hard bust) scatta ~5 bps prima del prezzo di azzeramento."""
+    """Docs: liquidation (hard bust) triggers ~5 bps before the zero-equity price."""
     return max(1 / lev - buffer, 1e-5)
 
 
 def lev_for_distance(d: float, buffer: float, lo: float, hi: float) -> float:
-    """Leva che mette la liquidazione esattamente a distanza d."""
+    """Leverage that puts the liquidation exactly at distance d."""
     return min(max(1 / (d + buffer), lo), hi)

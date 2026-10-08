@@ -1,8 +1,7 @@
-"""Stato del protocollo Papertrade.
+"""Papertrade protocol state.
 
-OnchainProtocol: legge il contratto su HyperEVM. Indirizzo e ABI non sono pubblici prima
-del lancio: vanno compilati in config.yaml → onchain.
-SimProtocol: simula LP, coda FIFO, emissioni PAPER e ricompense staker per i test.
+OnchainProtocol: reads the contracts on HyperEVM (addresses in config.yaml → onchain).
+SimProtocol: simulates the LP, FIFO queue, PAPER emissions and staker rewards for tests.
 """
 from __future__ import annotations
 
@@ -16,8 +15,8 @@ from .models import ProtocolState
 
 
 def emission_rate(tracked_lp: float, tail_progress: float, th: dict) -> float:
-    """Docs (PaperTokenomics): 100 PAPER/$ finché l'LP tracciata è sotto $2M (anche negativa);
-    sopra, 100 × (S / (S + H))² con S = $120M e H = guadagno LP cumulato oltre soglia (high-water mark)."""
+    """Docs (PaperTokenomics): 100 PAPER/$ while tracked LP is below $2M (even negative);
+    above, 100 × (S / (S + H))² with S = $120M and H = cumulative LP gain past the threshold (high-water mark)."""
     if tracked_lp < th["emission_decay_usd"]:
         return 100.0
     s = th.get("tail_decay_scale_usd", 120e6)
@@ -25,11 +24,11 @@ def emission_rate(tracked_lp: float, tail_progress: float, th: dict) -> float:
 
 
 class OnchainProtocol:
-    """Legge lo stato dai contratti Papertrade SENZA ABI ufficiale (contratti non verificati).
+    """Reads state from the Papertrade contracts WITHOUT an official ABI (contracts are unverified).
 
-    In config ogni funzione si scrive "contratto:nome", ad esempio "exchange:treasury" o
-    "tokenomics:tailProgressUsd"; gli indirizzi stanno in onchain.contracts. L'ABI minimo di ogni
-    getter (view, ritorno uint256, eventuale argomento address) viene costruito al volo.
+    In config each function is written "contract:name", e.g. "exchange:treasury" or
+    "tokenomics:tailProgressUsd"; addresses live in onchain.contracts. A minimal ABI for each
+    getter (view, uint256 return, optional address argument) is built on the fly.
     """
     simulated = False
 
@@ -39,24 +38,24 @@ class OnchainProtocol:
         if oc.get("contract_address"):
             contracts.setdefault("exchange", oc["contract_address"])
         if not contracts.get("exchange"):
-            raise RuntimeError("Indirizzo dell'Exchange non configurato (onchain.contracts.exchange).")
-        from web3 import Web3  # import solo se serve
+            raise RuntimeError("Exchange address not configured (onchain.contracts.exchange).")
+        from web3 import Web3  # imported only when needed
         self.Web3 = Web3
         self.w3 = Web3(Web3.HTTPProvider(oc["rpc_url"]))
         self.contracts = {k: Web3.to_checksum_address(v) for k, v in contracts.items() if v}
         self.fn = oc["functions"]
         self.me = Web3.to_checksum_address(oc["my_address"]) if oc.get("my_address") else None
-        self.ud = 10 ** oc["usd_decimals"]          # contabilità interna dell'Exchange (18 decimali)
+        self.ud = 10 ** oc["usd_decimals"]          # Exchange internal accounting (18 decimals)
         self.pd = 10 ** oc["paper_decimals"]
         self.th = thresholds
         self.cfg_ids = cfg.get("instrument_ids", {})
         self._rewards_hist: deque = deque()
 
     def raw(self, spec: str, *args):
-        """Chiama un getter. Formato: "contratto:nome", con estensioni opzionali:
-        "@altro_contratto" passa quell'indirizzo come argomento (es. "paper:balanceOf@staking"),
-        "#n" prende l'n-esimo valore di una struct (es. "exchange:marketOi#1"),
-        "(uint32)" forza il tipo degli argomenti (es. "exchange:marketOi(uint32)#1")."""
+        """Calls a getter. Format: "contract:name", with optional extensions:
+        "@other_contract" passes that address as the argument (e.g. "paper:balanceOf@staking"),
+        "#n" takes the n-th value of a struct (e.g. "exchange:marketOi#1"),
+        "(uint32)" forces the argument types (e.g. "exchange:marketOi(uint32)#1")."""
         idx = 0
         if "#" in spec:
             spec, i = spec.rsplit("#", 1)
@@ -92,11 +91,11 @@ class OnchainProtocol:
         tracked = self._call("tracked_lp", self.ud) if self.fn.get("tracked_lp") else treasury
         h = self._call("tail_progress", self.ud)
         return ProtocolState(
-            # se l'LP tracciata è leggibile usala per il regime: "treasury" potrebbe includere i depositi utenti
+            # use tracked LP for the regime when readable: "treasury" includes user deposits
             ts=now, lp_usd=(tracked if self.fn.get("tracked_lp") else treasury) + side, queue_usd=q, queue_len=int(self._call("queue_length", 1)),
             paper_supply=self._call("paper_supply", self.pd), paper_staked=self._call("paper_staked", self.pd),
             emission_per_usd=emission_rate(tracked, h, self.th),
-            staker_rewards_24h_usd=0.0,  # TODO: dagli eventi di distribuzione quando noti
+            staker_rewards_24h_usd=0.0,  # TODO: from distribution events once known
             paper_price=paper_price,
             my_paper=self._call("my_paper", self.pd, True), my_staked=self._call("my_staked", self.pd, True),
             my_pending_rewards=self._call("my_pending_rewards", self.ud, True),
@@ -111,13 +110,13 @@ class OnchainProtocol:
                 for a, iid in self.cfg_ids.items()}
 
     def haircut_params(self):
-        """Parametri esatti della curva, se le funzioni sono mappate in config."""
+        """Exact curve parameters, if the functions are mapped in config."""
         keys = ["hc_base_rate", "hc_rate_multiplier", "hc_position_multiplier", "hc_reference_notional"]
         if not all(self.fn.get(k) for k in keys):
             return None
-        return [self._call(k, 1) for k in keys]   # attenzione alle scale (1e18 ecc.)
+        return [self._call(k, 1) for k in keys]   # mind the scales (1e18 etc.)
 
-    # Nel protocollo reale il regolamento lo fa il contratto
+    # In the real protocol, settlement is done by the contract
     def settle_loss(self, amount, owner="me"):
         return None
 
@@ -134,20 +133,20 @@ class SimProtocol:
         self.th = thresholds
         self.rng = random.Random(sim.get("seed", 7) + 1)
         self.lp = 0.0
-        self.queue: deque = deque()          # [owner, importo]
+        self.queue: deque = deque()          # [owner, amount]
         self.supply = 0.0
         self.my_paper = 0.0
         self.my_staked = 0.0
         self.my_rewards = 0.0
-        self.rewards: deque = deque()        # (ts, usd) per il calcolo 24h
+        self.rewards: deque = deque()        # (ts, usd) for the 24h figure
         self.start = clock.now()
         self.last = self.start
         self.price = None
-        self.crowd_h = 0.10                  # trattenuta media sulle vincite della folla
-        self.tail = 0.0                      # H: high-water mark del guadagno LP cumulato oltre la soglia
+        self.crowd_h = 0.10                  # average haircut on the crowd's wins
+        self.tail = 0.0                      # H: high-water mark of cumulative LP gain past the threshold
         self.cum = 0.0
 
-    # ---------- stato ----------
+    # ---------- state ----------
     @property
     def queue_total(self) -> float:
         return sum(x[1] for x in self.queue)
@@ -175,11 +174,11 @@ class SimProtocol:
             self.lp = cap
             self._reward(excess)
 
-    # ---------- regolamento ----------
+    # ---------- settlement ----------
     def settle_loss(self, amount: float, owner: str = "me", liquidation: bool = False) -> float:
         solvent = not self.queue
-        fee = self.th["loss_fee_lp"] if solvent else 0.0       # 2% lato LP, solo se la coda è vuota
-        basis = amount if liquidation else amount * (1 - fee)  # liquidazioni: mint sul margine pieno
+        fee = self.th["loss_fee_lp"] if solvent else 0.0       # 2% on the LP side, only when the queue is empty
+        basis = amount if liquidation else amount * (1 - fee)  # liquidations: mint on the full margin
         minted = basis * emission_rate(self.lp, self.tail, self.th)
         self.supply += minted
         if owner == "me":
@@ -195,8 +194,8 @@ class SimProtocol:
         return minted
 
     def settle_win(self, gross: float, h: float, owner: str = "me") -> tuple[float, float]:
-        """Ritorna (pagato_subito, messo_in_coda). Il margine torna sempre: qui si regola solo il profitto."""
-        net = gross * (1 - h)                                  # la trattenuta resta all'LP
+        """Returns (paid_now, queued). The margin always comes back: only the profit is settled here."""
+        net = gross * (1 - h)                                  # the haircut stays with the LP
         self._reward(gross * h * self.cfg.get("win_carve", 0.0) * self.cfg["staker_share_of_carve"])
         if self.lp >= self.th["emission_decay_usd"]:
             self.cum -= net
@@ -209,7 +208,7 @@ class SimProtocol:
     def my_queued(self) -> float:
         return sum(x[1] for x in self.queue if x[0] == "me")
 
-    # ---------- folla simulata ----------
+    # ---------- simulated crowd ----------
     def step(self) -> None:
         now = self.clock.now()
         dt_h = (now - self.last) / 3600
@@ -221,7 +220,7 @@ class SimProtocol:
             self.settle_loss(net, owner="crowd")
         else:
             self.settle_win(-net / (1 - self.crowd_h), self.crowd_h, owner="crowd")
-        if now - self.start < c.get("rush_minutes", 0) * 60:          # corsa iniziale: liquidazioni volute
+        if now - self.start < c.get("rush_minutes", 0) * 60:          # opening rush: deliberate liquidations
             self.settle_loss(c["rush_loss_per_hour"] * dt_h * self.rng.uniform(0.5, 1.5), owner="crowd")
         if self.rng.random() < c["whale_prob_per_hour"] * dt_h:
             self.settle_win(c["whale_win_usd"], 0.05, owner="whale")

@@ -1,10 +1,9 @@
-"""Regime del protocollo + strategie + scheda azioni.
+"""Protocol regime + strategies + action card.
 
-Formula chiave (spiegata in GUIDA.md): per un trade con TP e SL alla stessa distanza d,
-EV per $1 di margine ≈ 0,5 × (E × P_eff − 1 + q × (1 − h(d)))
-  E = PAPER emessi per $1 perso, P_eff = prezzo PAPER scontato, q = probabilità che la coda
-  paghi, h(d) = trattenuta sul profitto a quella distanza. Senza prezzo PAPER il costo
-  atteso per trade è circa h/2 del margine: stai comprando PAPER a sconto.
+Key formula (explained in GUIDE.md): for a trade with TP and SL at the same distance d,
+EV per $1 of margin ≈ 0.5 × (E × P_eff − 1 + q × G × (1 − h(d)))
+  E = PAPER minted per $1 lost, P_eff = discounted PAPER price, q = probability the queue pays,
+  G = gross profit per $ of margin at the TP, h(d) = haircut on the profit at that distance.
 """
 from __future__ import annotations
 
@@ -18,15 +17,15 @@ import yaml
 from .haircut import HaircutModel
 from .models import ROME, Intent, MarketSnapshot, Position, ProtocolState, lev_for_distance, liq_distance, rome
 
-INSOLVENTE, BOOTSTRAP, DECADIMENTO, SWEEP = "INSOLVENTE", "BOOTSTRAP", "DECADIMENTO", "SWEEP"
+INSOLVENT, BOOTSTRAP, DECAY, SWEEP = "INSOLVENT", "BOOTSTRAP", "DECAY", "SWEEP"
 
 PHASE_TEXT = {
-    -1: "PRE-LANCIO: prepara i wallet e testa il bot. Il predeposito apre l'08/10.",
-    0: "FASE 0 – PREDEPOSITO: deposita e crea l'account ADESSO. Trading in pausa. Dopo, i depositi avranno priorità bassa.",
-    1: "FASE 1 – SOLO FRONTEND: ordini solo da papertrade.xyz tramite relayer. Il bot dà segnali MANUALI. "
-       "Nozionale piccolo = conferme lente; gli ordini in attesa si possono annullare. PAPER non trasferibile.",
-    2: "FASE 2 – CONTRATTO APERTO: esecuzione automatica possibile. Attenzione a MEV e bot concorrenti.",
-    4: "FASE 4 – PAPER TRASFERIBILE: acquisto/vendita possibili, valuta il mercato secondario.",
+    -1: "PRE-LAUNCH: set up the wallets and test the bot. Predeposit opens on 08/10.",
+    0: "PHASE 0 – PREDEPOSIT: deposit and create the account NOW. Trading paused. Later, deposits get low priority.",
+    1: "PHASE 1 – FRONTEND ONLY: orders only via papertrade.xyz relayers. The bot gives MANUAL signals. "
+       "Small notional = slow confirmations; pending orders can be cancelled. PAPER not transferable.",
+    2: "PHASE 2 – OPEN CONTRACT: automatic execution possible. Watch out for MEV and competing bots.",
+    4: "PHASE 4 – PAPER TRANSFERABLE: buying/selling possible, consider the secondary market.",
 }
 
 
@@ -48,22 +47,22 @@ def current_phase(cfg: dict, now: float, launch_ts: float) -> int:
 
 
 def paper_value(cfg: dict, st: ProtocolState, phase: int) -> tuple[float | None, str]:
-    """Prezzo di mercato se PAPER è trasferibile, altrimenti valore implicito dai flussi di staking."""
+    """Market price if PAPER is transferable, otherwise an implied value from staking cash flows."""
     pc = cfg["paper"]
     if phase >= 4 and st.paper_price:
-        return st.paper_price * (1 - pc["liquidity_discount"]), "mercato"
+        return st.paper_price * (1 - pc["liquidity_discount"]), "market"
     if st.paper_staked > 0 and st.staker_rewards_24h_usd > 0:
-        # all'inizio la supply è minuscola e cresce in fretta: dividere per la supply di oggi gonfia il valore.
-        # Si usa la supply attesa tra N giorni al ritmo di conio delle ultime 24h.
+        # early on supply is tiny and grows fast: dividing by today's supply inflates the value.
+        # Use the supply expected in N days at the last 24h mint rate.
         future = st.paper_staked + st.paper_minted_24h * pc.get("dilution_horizon_days", 90)
         per_token = st.staker_rewards_24h_usd * 365 / future
-        return per_token / pc["implied_required_yield"] * (1 - pc["nontransferable_discount"]), "implicito"
+        return per_token / pc["implied_required_yield"] * (1 - pc["nontransferable_discount"]), "implied"
     return None, "n/d"
 
 
 def contrarian_side(cfg: dict, st: ProtocolState, asset: str):
-    """Lato opposto alla folla se l'OI è sbilanciato. Se la folla vince, l'LP va sotto e la coda si
-    allunga: chi sta dall'altra parte perde quando l'emissione è al massimo e vince quando l'LP è piena."""
+    """Side opposite the crowd when OI is skewed. If the crowd wins, the LP goes under and the queue
+    grows: the other side loses while emission is at its max and wins when the LP is full."""
     c = cfg.get("crowd", {})
     if not c.get("enabled") or not st.oi or asset not in st.oi:
         return None
@@ -76,7 +75,7 @@ def contrarian_side(cfg: dict, st: ProtocolState, asset: str):
 
 
 def fee_per_margin(cfg: dict, lev: float, gross_win: float) -> tuple[float, float]:
-    """(costo fisso per $ di margine, quota tolta dalle vincite)."""
+    """(fixed cost per $ of margin, share taken from wins)."""
     f = cfg.get("fees", {})
     r, base = f.get("frontend_rate", 0.0), f.get("frontend_base", "margin")
     if base == "margin":
@@ -101,11 +100,11 @@ class RegimeDetector:
         eff = st.effective_lp
         self.peak = max(self.peak, eff)
         if st.queue_usd > 0 or eff <= 0:
-            r = INSOLVENTE
+            r = INSOLVENT
         elif eff < self.th["emission_decay_usd"]:
             r = BOOTSTRAP
         elif eff < self.th["sweep_usd"]:
-            r = DECADIMENTO
+            r = DECAY
         else:
             r = SWEEP
         self.drain = self.peak >= self.th["emission_decay_usd"] and eff < self.peak * (1 - self.th["drain_drop_pct"])
@@ -140,7 +139,7 @@ class StrategyBook:
         self.events = events
         self.opened_events: set = set()
 
-    # ---------- dimensionamento comune ----------
+    # ---------- shared sizing ----------
     def sizing(self, vol_1m: float) -> tuple[float, float, float]:
         lv = self.cfg["leverage"]
         d = self.h.choose_distance(self.cfg["haircut"]["target_max"])
@@ -152,21 +151,21 @@ class StrategyBook:
 
     def farming_ev(self, st: ProtocolState, regime: str, d: float, lev: float, phase: int,
                    with_paper: bool = True) -> float | None:
-        """EV per $1 di margine di un trade con TP = d e SL = liquidazione (≈ 50/50)."""
+        """EV per $1 of margin of a trade with TP = d and SL = liquidation (≈ 50/50)."""
         p_eff, _ = paper_value(self.cfg, st, phase)
         if with_paper and p_eff is None:
             return None
         q = self.cfg["paper"]["queue_pay_prob"].get(regime, 1.0)
-        gross = lev * d                                  # profitto lordo per $ se tocca il TP
+        gross = lev * d                                  # gross profit per $ if the TP is hit
         fixed, on_win = fee_per_margin(self.cfg, lev, gross)
         win = q * gross * (1 - self.h.estimate(d)) * (1 - on_win)
         paper = st.emission_per_usd * (p_eff or 0.0) if with_paper else 0.0
-        # la fee si paga alla chiusura: sul ramo vincente sempre, sul perdente (liquidazione) solo se configurato
+        # fee is paid on close: always on the winning branch, on the losing one (liquidation) only if configured
         loss_fee = fixed if self.cfg.get("fees", {}).get("charged_on_liquidation", False) else 0.0
         return 0.5 * (paper - 1 - loss_fee + win - fixed)
 
     def cost_per_paper(self, st: ProtocolState, regime: str, d: float, lev: float) -> float | None:
-        """Costo atteso per PAPER di un trade TP = SL (o di una coppia): (1 − q·G·(1−h)) / E."""
+        """Expected cost per PAPER of a TP = SL trade (or a pair): (1 − q·G·(1−h)) / E."""
         if st.emission_per_usd <= 0:
             return None
         q = self.cfg["paper"]["queue_pay_prob"].get(regime, 1.0)
@@ -177,33 +176,33 @@ class StrategyBook:
     def _open_by(open_pos, strategy, asset=None):
         return [p for p in open_pos if p.strategy == strategy and (asset is None or p.asset == asset)]
 
-    # ---------- generazione ordini ----------
+    # ---------- order generation ----------
     def intents(self, now: float, st: ProtocolState, regime: str, drain: bool,
                 snaps: dict[str, MarketSnapshot], open_pos: list[Position], phase: int = 1) -> list[Intent]:
         out: list[Intent] = []
         s = self.cfg["strategies"]
         if phase < 1:
-            return out                                   # pre-lancio / predeposito: niente trading
+            return out                                   # pre-launch / predeposit: no trading
 
-        # S1 — finestra di lancio: posizioni piccole, TP=SL nella zona a trattenuta bassa
+        # S1 — launch window: small positions, TP=SL in the low-haircut zone
         e = s["early"]
         in_window = 0 <= now - self.launch_ts <= e["days_from_launch"] * 86400
         drain_off = drain and self.cfg["thresholds"].get("drain_mode", "defensive") == "defensive"
-        if e["enabled"] and in_window and regime in (INSOLVENTE, BOOTSTRAP) and not drain_off:
+        if e["enabled"] and in_window and regime in (INSOLVENT, BOOTSTRAP) and not drain_off:
             for a, sn in snaps.items():
                 if self._open_by(open_pos, "S1", a):
                     continue
                 side = "long" if sn.mid > sn.range_high else "short" if sn.mid < sn.range_low else None
                 cs = contrarian_side(self.cfg, st, a)
                 if cs and side:
-                    side = cs                     # con folla sbilanciata il lato lo decide il posizionamento
+                    side = cs                     # with a skewed crowd, positioning decides the side
                 if not side:
                     continue
                 d, lev, liq = self.sizing(sn.vol_1m)
                 out.append(Intent("S1", a, side, e["margin_usd"], lev, d, liq, e["max_hold_minutes"],
                                   f"breakout {e['breakout_lookback_min']}m, d={d:.2%}, h≈{self.h.estimate(d):.0%}"))
 
-        # S2 — eventi: straddle (long + short). La gamba perdente conia PAPER, la vincente corre
+        # S2 — events: straddle (long + short). The losing leg mints PAPER, the winner runs
         c = s["catalyst"]
         if c["enabled"]:
             for ev in self.events:
@@ -223,10 +222,10 @@ class StrategyBook:
                     hold = c["open_minutes_before"] + c["close_minutes_after"]
                     for side in ("long", "short"):
                         out.append(Intent("S2", a, side, c["margin_usd"], lev, c["tp_fraction_of_move"] * m, liq,
-                                          hold, f"{ev['name']} atteso {ev['expected_move_bps']:.0f}bps",
+                                          hold, f"{ev['name']} expected {ev['expected_move_bps']:.0f}bps",
                                           group=grp))
 
-        # S3 — farming continuo: per prezzo massimo per PAPER oppure per EV
+        # S3 — continuous farming: by maximum price per PAPER or by EV
         f = s["farming"]
         drain_block = drain and self.cfg["thresholds"].get("drain_mode", "defensive") == "defensive"
         if f["enabled"] and not drain_block:
@@ -239,7 +238,7 @@ class StrategyBook:
                     cost = self.cost_per_paper(st, regime, d, lev)
                     if cost is None or cost > f["max_cost_per_paper"]:
                         continue
-                    why = f"costo stimato ${cost:.4f}/PAPER ≤ ${f['max_cost_per_paper']}"
+                    why = f"estimated cost ${cost:.4f}/PAPER ≤ ${f['max_cost_per_paper']}"
                 else:
                     ev = self.farming_ev(st, regime, d, lev, phase)
                     if pv is None or ev is None or ev < f["min_ev_per_margin"]:
@@ -249,7 +248,7 @@ class StrategyBook:
                     grp = f"S3pair:{a}:{int(now)}"
                     for side in ("long", "short"):
                         out.append(Intent("S3", a, side, f["margin_usd"], lev, d, liq, f["max_hold_minutes"],
-                                          f"coppia ±{d:.2%}, {why}", group=grp,
+                                          f"pair ±{d:.2%}, {why}", group=grp,
                                           wallet=self.cfg["strategy_wallets"].get(side, "")))
                 else:
                     side = contrarian_side(self.cfg, st, a) or ("long" if sn.mid >= (sn.range_high + sn.range_low) / 2 else "short")
@@ -257,7 +256,7 @@ class StrategyBook:
         prio = {"S2": 0, "S3": 1, "S1": 2}
         return sorted(out, key=lambda i: prio[i.strategy])
 
-    # ---------- scheda azioni ----------
+    # ---------- action card ----------
     def action_card(self, now: float, st: ProtocolState, regime: str, drain: bool, queue_alert: bool,
                     snaps: dict[str, MarketSnapshot], phase: int = 1, spent=(0.0, 0.0)) -> tuple[str, dict]:
         pc = self.cfg["paper"]
@@ -268,87 +267,91 @@ class StrategyBook:
         pv, src = paper_value(self.cfg, st, phase)
         apr = st.staking_apr if phase >= 4 else None
         acts = {"stake": False, "claim": False}
-        L = [f"REGIME: {regime}{' + DRENAGGIO' if drain else ''}  |  ora Roma {rome(now)}",
+        L = [f"REGIME: {regime}{' + DRAIN' if drain else ''}  |  Rome time {rome(now)}",
              PHASE_TEXT.get(phase, PHASE_TEXT[1]),
-             f"LP ${st.lp_usd:,.0f}  coda ${st.queue_usd:,.0f} ({st.queue_len})  LP effettiva ${st.effective_lp:,.0f}",
-             f"Emissione {st.emission_per_usd:.1f} PAPER/$  |  valore PAPER ({src}, scontato) "
-             f"{'n/d' if pv is None else f'${pv:.6f}'}  |  APR staking "
-             f"{'n/d' if apr is None else f'{apr:.0%}'}",
-             f"Costo PAPER: trade simmetrico ≈ ${-ev0 / (0.5 * st.emission_per_usd):.4f}/PAPER "
-             f"(EV {ev0:+.3f}/$ senza PAPER) | liquidazione voluta ≈ ${1 / st.emission_per_usd:.4f}/PAPER",
-             f"Trattenuta: {self.h.describe()} → distanza TP/SL {d:.2%}, leva {lev:.0f}x, h≈{self.h.estimate(d):.0%}"]
+             f"LP ${st.lp_usd:,.0f}  queue ${st.queue_usd:,.0f} ({st.queue_len})  effective LP ${st.effective_lp:,.0f}",
+             f"Emission {st.emission_per_usd:.1f} PAPER/$  |  PAPER value ({src}, discounted) "
+             f"{'n/a' if pv is None else f'${pv:.6f}'}  |  staking APR "
+             f"{'n/a' if apr is None else f'{apr:.0%}'}",
+             f"PAPER cost: symmetric trade ≈ ${-ev0 / (0.5 * st.emission_per_usd):.4f}/PAPER "
+             f"(EV {ev0:+.3f}/$ without PAPER) | deliberate liquidation ≈ ${1 / st.emission_per_usd:.4f}/PAPER",
+             f"Haircut: {self.h.describe()} → TP/SL distance {d:.2%}, leverage {lev:.0f}x, h≈{self.h.estimate(d):.0%}"]
         in_window = 0 <= now - self.launch_ts <= self.cfg["strategies"]["early"]["days_from_launch"] * 86400
         drain_off = drain and self.cfg["thresholds"].get("drain_mode", "defensive") == "defensive"
-        s1 = in_window and regime in (INSOLVENTE, BOOTSTRAP) and not drain_off
-        L.append(f"S1 finestra di lancio: {'ATTIVA' if s1 else 'spenta'}")
+        st_cfg = self.cfg["strategies"]
+        s1 = st_cfg["early"]["enabled"] and in_window and regime in (INSOLVENT, BOOTSTRAP) and not drain_off
+        L.append(f"S1 launch window: {'ACTIVE' if s1 else 'off'}")
         nxt = [e for e in self.events if e["ts"] > now]
-        L.append("S2 eventi: " + (f"prossimo {nxt[0]['name']} alle {rome(nxt[0]['ts'])}" if nxt else "nessuno in calendario"))
+        if not st_cfg["catalyst"]["enabled"]:
+            L.append("S2 events: off")
+        else:
+            L.append("S2 events: " + (f"next {nxt[0]['name']} at {rome(nxt[0]['ts'])}" if nxt else "none scheduled"))
         f = self.cfg["strategies"]["farming"]
         if f.get("mode", "ev") == "price":
             c3 = self.cost_per_paper(st, regime, d, lev)
             on = c3 is not None and c3 <= f["max_cost_per_paper"] and not drain_off
-            L.append(f"S3 farming (prezzo max ${f['max_cost_per_paper']}): costo stimato "
-                     f"{'n/d' if c3 is None else f'${c3:.4f}'}/PAPER → " +
-                     ("spento (drenaggio)" if drain_off else "ATTIVO" if on else "spento (troppo caro)"))
+            L.append(f"S3 farming (max price ${f['max_cost_per_paper']}): estimated cost "
+                     f"{'n/a' if c3 is None else f'${c3:.4f}'}/PAPER → " +
+                     ("off (drain)" if drain_off else "ACTIVE" if on else "off (too expensive)"))
         else:
-            L.append("S3 farming: " + ("serve un valore PAPER (prezzo o ricompense staking)" if ev is None else
-                                       f"EV {ev:+.2f}/$ → " + ("spento (drenaggio)" if drain_off else
-                                       "ATTIVO" if ev >= f['min_ev_per_margin'] else "spento (EV sotto soglia)")))
+            L.append("S3 farming: " + ("needs a PAPER value (price or staking rewards)" if ev is None else
+                                       f"EV {ev:+.2f}/$ → " + ("off (drain)" if drain_off else
+                                       "ACTIVE" if ev >= f['min_ev_per_margin'] else "off (EV below threshold)")))
         # PAPER
         if phase < 4:
-            paper = ("NON TRASFERIBILE: nessun acquisto/vendita possibile. Stake di tutti i PAPER coniati, "
-                     "il loro valore oggi sono solo le ricompense in USDC.")
+            paper = ("NOT TRANSFERABLE: no buying/selling possible. Stake all minted PAPER, "
+                     "its only value today is the USDC rewards.")
             acts["stake"] = phase >= 1
         elif drain:
-            paper = "RIDUCI: LP in calo forte, emissioni in risalita. Non comprare, alleggerisci i PAPER liberi."
+            paper = "REDUCE: LP falling hard, emissions rising again. Don't buy, trim free PAPER."
         elif not st.paper_price:
-            paper = "Non quotato: accumula solo dalle perdite e metti in staking ciò che ricevi."
+            paper = "Not listed: accumulate only from losses and stake what you receive."
             acts["stake"] = True
-        elif regime in (INSOLVENTE, BOOTSTRAP):
-            paper = "NON COMPRARE: emissioni massime (100/$) → offerta in crescita. Stake dei PAPER ricevuti."
+        elif regime in (INSOLVENT, BOOTSTRAP):
+            paper = "DON'T BUY: max emissions (100/$) → supply growing. Stake the PAPER you receive."
             acts["stake"] = True
-        elif regime == DECADIMENTO:
+        elif regime == DECAY:
             ok = apr is not None and apr >= pc["target_apr"]
-            paper = ("ACCUMULA + STAKE: APR sopra soglia" if ok else
-                     f"ASPETTA: APR {'n/d' if apr is None else f'{apr:.0%}'} < {pc['target_apr']:.0%}") + "; stake dei PAPER già in mano."
+            paper = ("ACCUMULATE + STAKE: APR above threshold" if ok else
+                     f"WAIT: APR {'n/a' if apr is None else f'{apr:.0%}'} < {pc['target_apr']:.0%}") + "; stake the PAPER you hold."
             acts["stake"] = True
         else:
-            paper = "STAKE TUTTO: sweep attivo, ogni $ di guadagno LP sopra 5M va agli staker."
+            paper = "STAKE EVERYTHING: sweep active, every $ of LP gain above $5M goes to stakers."
             acts["stake"] = True
         L.append("PAPER: " + paper)
-        lost, minted = spent        # lost = perdita NETTA di tutti i trade chiusi (perdite − profitti)
+        lost, minted = spent        # lost = NET loss of all closed trades (losses − profits)
         if minted > 0:
-            L.append(f"Costo netto PAPER: ${lost / minted:.4f}/PAPER (risultato trade ${-lost:+,.2f}, {minted:,.0f} PAPER coniati)"
-                     if lost > 0 else f"PAPER a costo zero: trade in utile di ${-lost:,.2f} con {minted:,.0f} PAPER coniati")
+            L.append(f"Net PAPER cost: ${lost / minted:.4f}/PAPER (trading result ${-lost:+,.2f}, {minted:,.0f} PAPER minted)"
+                     if lost > 0 else f"Zero-cost PAPER: trades up ${-lost:,.2f} with {minted:,.0f} PAPER minted")
         if phase >= 4 and st.paper_price:
             if apr is not None and apr < pc["sell_apr"]:
-                L.append(f"VENDI: APR {apr:.0%} < {pc['sell_apr']:.0%} → il prezzo sconta più dei flussi reali. "
-                         "Vendi metà dei PAPER (unstake se serve).")
+                L.append(f"SELL: APR {apr:.0%} < {pc['sell_apr']:.0%} → the price discounts more than the real cash flows. "
+                         "Sell half your PAPER (unstake if needed).")
             elif apr is not None and apr < pc["prepare_unstake_apr"] and pc["unstake_wait_hours"] > 0:
-                L.append(f"PREPARA: APR {apr:.0%} vicino alla soglia di vendita, avvia l'unstake di metà "
-                         f"(attesa {pc['unstake_wait_hours']}h).")
+                L.append(f"PREPARE: APR {apr:.0%} near the sell threshold, start unstaking half "
+                         f"(wait {pc['unstake_wait_hours']}h).")
             if minted > 0 and lost > 0 and st.paper_price >= pc["recoup_multiple"] * lost / minted:
                 n = lost / st.paper_price
-                L.append(f"RECUPERA CAPITALE: prezzo ≥ {pc['recoup_multiple']:.0f}× costo medio. Vendi ~{n:,.0f} PAPER "
-                         f"(= ${lost:,.0f} spesi) e tieni il resto in staking a costo zero.")
+                L.append(f"RECOUP CAPITAL: price ≥ {pc['recoup_multiple']:.0f}× average cost. Sell ~{n:,.0f} PAPER "
+                         f"(= ${lost:,.0f} spent) and keep the rest staked at zero cost.")
         if st.my_pending_rewards >= pc["claim_min_usd"]:
-            L.append(f"CLAIM: ${st.my_pending_rewards:,.2f} di ricompense disponibili")
+            L.append(f"CLAIM: ${st.my_pending_rewards:,.2f} of rewards available")
             acts["claim"] = True
         if st.my_queued_usd > 0:
-            L.append(f"In coda a tuo favore: ${st.my_queued_usd:,.2f} (usabile come margine per nuove aperture)")
+            L.append(f"Queued in your favour: ${st.my_queued_usd:,.2f} (usable as margin for new opens)")
             qr = self.cfg.get("queue_recycle", {})
             if qr.get("enabled") and st.my_queued_usd >= qr["min_queued_usd"] and st.queue_len >= qr["min_queue_len"]:
-                L.append("RICICLA CODA: usa il saldo in coda come margine per S1/S3. Se perdi, il credito distrutto "
-                         f"conia PAPER a {st.emission_per_usd:.0f}/$; se vinci, il profitto torna in coda.")
+                L.append("RECYCLE QUEUE: use the queued balance as margin for S1/S3. If you lose, the destroyed credit "
+                         f"mints PAPER at {st.emission_per_usd:.0f}/$; if you win, the profit goes back to the queue.")
         if queue_alert:
-            L.append("ALERT: la coda è cresciuta molto nell'ultima ora")
+            L.append("ALERT: the queue grew a lot in the last hour")
         return "\n".join(L), acts
 
 
 class RushTracker:
-    """Modalità corsa: la prima fase dopo il lancio, quando la folla si liquida apposta per coniare
-    PAPER a 100 per $1. La finestra si chiude quando l'LP effettiva supera i $2M (emissione in
-    decadimento), non a un orario fisso: il bot misura la velocità dell'LP e stima quando succederà."""
+    """Rush mode: the first stretch after launch, when the crowd liquidates on purpose to mint
+    PAPER at 100 per $1. The window closes when emission drops below min_emission (or after max_minutes),
+    not at a fixed time: the bot measures LP growth speed and estimates when that will happen."""
 
     def __init__(self, cfg: dict, launch_ts: float):
         self.cfg = cfg
@@ -357,7 +360,7 @@ class RushTracker:
         self.hist: deque = deque()
         self.ended = False
         self.end_reason = ""
-        self.spent = 0.0          # margine impegnato in ordini della corsa
+        self.spent = 0.0          # margin committed to rush orders
         self.minted = 0.0
         self.lost = 0.0
         self.rr = 0
@@ -370,15 +373,15 @@ class RushTracker:
             self.hist.popleft()
         if not self.ended and now >= self.launch:
             if st.emission_per_usd < self.r.get("min_emission", 95):
-                self.ended, self.end_reason = True, f"emissione sotto {self.r.get('min_emission', 95)} PAPER/$"
+                self.ended, self.end_reason = True, f"emission below {self.r.get('min_emission', 95)} PAPER/$"
             elif now - self.launch > self.r.get("max_minutes", 120) * 60:
-                self.ended, self.end_reason = True, "tempo massimo della corsa superato"
+                self.ended, self.end_reason = True, "maximum rush time exceeded"
 
     def active(self, now: float) -> bool:
         return bool(self.r.get("enabled")) and not self.ended and now >= self.launch
 
     def rate(self) -> float:
-        """$ al secondo di crescita dell'LP effettiva nella finestra recente."""
+        """$ per second of effective LP growth over the recent window."""
         if len(self.hist) < 2:
             return 0.0
         (t0, l0), (t1, l1) = self.hist[0], self.hist[-1]
@@ -392,13 +395,13 @@ class RushTracker:
         return gap / r if r > 0 else float("inf")
 
     def target_lp(self) -> float:
-        """LP a cui l'emissione scende sotto min_emission: soglia + S·(√(100/E) − 1)."""
+        """LP at which emission falls below min_emission: threshold + S·(√(100/E) − 1)."""
         th = self.cfg["thresholds"]
         e = self.r.get("min_emission", 95)
         return th["emission_decay_usd"] + th["tail_decay_scale_usd"] * (math.sqrt(100 / e) - 1)
 
     def projected_emission(self, st: ProtocolState, seconds: float) -> float:
-        """Emissione stimata tra `seconds` al ritmo attuale di crescita dell'LP."""
+        """Estimated emission in `seconds` at the current LP growth rate."""
         th = self.cfg["thresholds"]
         S, thr = th["tail_decay_scale_usd"], th["emission_decay_usd"]
         rate = max(self.rate(), 0.0)
@@ -410,17 +413,17 @@ class RushTracker:
         return 100.0 * (S / (S + h_f)) ** 2
 
     def choose_mode(self, st: ProtocolState, snaps: dict, delay_s: float) -> tuple[str, str]:
-        """Coppie delta neutral costano meno per PAPER; il burn conia di più per ordine.
-        Il burn conviene solo se l'emissione cala in fretta durante il tempo di un ciclo coppia."""
+        """Delta-neutral pairs cost less per PAPER; burning mints more per order.
+        Burning only pays off if emission drops fast within one pair cycle."""
         m = self.r.get("mode", "auto")
         if m != "auto":
-            return m, "scelta manuale"
+            return m, "manual choice"
         cycle = self.r["pair_target_minutes"] * 60 + delay_s
         e_f = self.projected_emission(st, cycle)
         drop = 1 - e_f / st.emission_per_usd
         if drop > self.r["burn_if_emission_drop"]:
-            return "burn", f"emissione stimata −{drop:.0%} in un ciclo coppia"
-        return "pairs", f"emissione stabile (−{drop:.0%} in un ciclo)"
+            return "burn", f"estimated emission −{drop:.0%} within a pair cycle"
+        return "pairs", f"stable emission (−{drop:.0%} per cycle)"
 
     def intents(self, now: float, st: ProtocolState, snaps: dict, busy: list, delay_s: float) -> list[Intent]:
         r = self.r
@@ -430,7 +433,7 @@ class RushTracker:
         left = self.r["max_minutes"] * 60 - (now - self.launch)
         eta2 = min(eta2, left)
         if eta2 < delay_s + r["cancel_buffer_s"]:
-            return []                       # l'ordine verrebbe confermato a finestra chiusa
+            return []                       # the order would confirm after the window closed
         mode, why = self.choose_mode(st, snaps, delay_s)
         self.mode, self.mode_why = mode, why
         rush_busy = [b for b in busy if b.strategy == "RUSH"]
@@ -442,7 +445,7 @@ class RushTracker:
                 if len(rush_busy) + 2 > r["max_open"] or self.spent + 2 * r["margin_usd"] > r["budget_usd"]:
                     break
                 if any(b.asset == sn.asset for b in rush_busy):
-                    continue                # una coppia per asset alla volta
+                    continue                # one pair per asset at a time
                 d = max(sn.vol_1m * math.sqrt(r["pair_target_minutes"]), r["pair_min_distance"])
                 lev = lev_for_distance(d, lv["liq_buffer"], lv["min"], min(r["leverage"], lv["max"]))
                 liq = liq_distance(lev, lv["liq_buffer"])
@@ -450,21 +453,21 @@ class RushTracker:
                 for side, w in (("long", self.cfg["strategy_wallets"].get("long", "B")),
                                 ("short", self.cfg["strategy_wallets"].get("short", "C"))):
                     it = Intent("RUSH", sn.asset, side, r["margin_usd"], lev, liq, liq, r["max_minutes"],
-                                f"coppia delta neutral ±{liq:.2%} ({why}); fine corsa tra {eta_txt}",
+                                f"delta-neutral pair ±{liq:.2%} ({why}); rush ends in {eta_txt}",
                                 group=f"pair:{sn.asset}:{self.rr}", wallet=w)
                     out.append(it)
                     rush_busy.append(it)
                 self.spent += 2 * r["margin_usd"]
             return out
-        assets = sorted(snaps.values(), key=lambda s: -s.vol_1m)   # più volatile = liquidazione più rapida
+        assets = sorted(snaps.values(), key=lambda s: -s.vol_1m)   # more volatile = faster liquidation
         while len(rush_busy) < r["max_open"] and self.spent + r["margin_usd"] <= r["budget_usd"] and assets:
             sn = assets[self.rr % len(assets)]
             fixed = "long" if self.cfg["assets"].index(sn.asset) % 2 == 0 else "short"
-            side = fixed                      # wallet A: un solo lato per asset
+            side = fixed                      # wallet A: a single side per asset
             lev = min(r["leverage"], lv["max"])
             liq = liq_distance(lev, lv["liq_buffer"])
             it = Intent("RUSH", sn.asset, side, r["margin_usd"], lev, 1.0, liq, r["max_minutes"],
-                        f"burn ({why}); fine corsa tra {eta_txt}, nozionale ${r['margin_usd'] * lev:,.0f}",
+                        f"burn ({why}); rush ends in {eta_txt}, notional ${r['margin_usd'] * lev:,.0f}",
                         wallet=self.cfg["strategy_wallets"].get("RUSH", "A"))
             out.append(it)
             rush_busy.append(it)
@@ -477,22 +480,22 @@ class RushTracker:
             return []
         th = self.cfg["thresholds"]
         if self.ended:
-            return [f"CORSA FINITA ({self.end_reason}). Strategie normali in base al regime."]
+            return [f"RUSH OVER ({self.end_reason}). Normal strategies based on the regime."]
         e2, e5 = self.eta(self.target_lp(), st), self.eta(th["sweep_usd"], st)
-        fmt = lambda x: "n/d" if x == float("inf") else f"{x / 60:.0f} min"
+        fmt = lambda x: "n/a" if x == float("inf") else f"{x / 60:.0f} min"
         avg = self.lost / self.minted if self.minted else 0.0
         share = (st.my_paper + st.my_staked) / st.paper_supply if st.paper_supply else 0.0
         cap = st.paper_supply * 0.01
         return [
-            f"CORSA ATTIVA da {(now - self.launch) / 60:.0f} min | LP +${self.rate() * 60:,.0f}/min | "
-            f"emissione {st.emission_per_usd:.1f}/$ | sotto {self.r.get('min_emission', 95)}/$ tra {fmt(e2)} | sweep $5M tra {fmt(e5)}",
-            f"Budget corsa: ${self.spent:,.0f}/${self.r['budget_usd']:,.0f} | costo netto ${self.lost:,.2f} | "
-            f"PAPER coniati {self.minted:,.0f} (costo netto ${avg:.4f}/PAPER) | quota supply {share:.4%}",
-            f"Valutazione al conio: supply {st.paper_supply:,.0f} × $0,01 = ${cap:,.0f}. Per un rendimento del 100% "
-            f"servono ${cap:,.0f}/anno agli staker.",
-            (f"MODALITÀ COPPIE ({self.mode_why}): stesso asset, stessa size, long su B e short su C insieme. "
-             "Una gamba si liquida e conia PAPER, l'altra chiude in profitto (o si liquida a sua volta e conia)."
+            f"RUSH ACTIVE for {(now - self.launch) / 60:.0f} min | LP +${self.rate() * 60:,.0f}/min | "
+            f"emission {st.emission_per_usd:.1f}/$ | below {self.r.get('min_emission', 95)}/$ in {fmt(e2)} | $5M sweep in {fmt(e5)}",
+            f"Rush budget: ${self.spent:,.0f}/${self.r['budget_usd']:,.0f} | net cost ${self.lost:,.2f} | "
+            f"PAPER minted {self.minted:,.0f} (net cost ${avg:.4f}/PAPER) | supply share {share:.4%}",
+            f"Valuation at mint: supply {st.paper_supply:,.0f} × $0.01 = ${cap:,.0f}. A 100% yield "
+            f"needs ${cap:,.0f}/year to stakers.",
+            (f"PAIRS MODE ({self.mode_why}): same asset, same size, long on B and short on C together. "
+             "One leg liquidates and mints PAPER, the other closes in profit (or liquidates too and mints)."
              if self.mode == "pairs" else
-             f"MODALITÀ BURN ({self.mode_why}): wallet A a leva massima, niente TP, lascia liquidare."),
-            "STAKE subito i PAPER ricevuti. Annulla gli ordini in attesa quando il bot lo segnala.",
+             f"BURN MODE ({self.mode_why}): wallet A at max leverage, no TP, let it liquidate."),
+            "STAKE the PAPER you receive right away. Cancel pending orders when the bot says so.",
         ]

@@ -1,4 +1,4 @@
-"""Persistenza (SQLite), alert (console + Telegram) e gestione del rischio."""
+"""Persistence (SQLite), alerts (console + Telegram) and risk management."""
 from __future__ import annotations
 
 import json
@@ -91,9 +91,9 @@ class RiskManager:
         if s.spread_bps > r["max_spread_bps"]:
             out.append(f"spread {s.spread_bps:.1f}bps")
         if s.oracle_div_bps > r["max_oracle_div_bps"]:
-            out.append(f"divergenza oracle {s.oracle_div_bps:.1f}bps")
+            out.append(f"oracle divergence {s.oracle_div_bps:.1f}bps")
         if now - s.ts > r["stale_seconds"]:
-            out.append("dati vecchi")
+            out.append("stale data")
         return out
 
     def kill_requested(self) -> bool:
@@ -108,24 +108,24 @@ class RiskManager:
     def approve(self, it: Intent, open_pos: list, snap: MarketSnapshot, now: float) -> tuple[bool, str]:
         c = self.cfg["capital"]
         if self.kill_requested():
-            return False, "kill switch attivo"
+            return False, "kill switch active"
         it.wallet = self.wallet_for(it)
-        for p in open_pos:                             # stesso account: niente long e short sullo stesso asset
+        for p in open_pos:                             # same account: no long and short on the same asset
             if getattr(p, "wallet", "") == it.wallet and p.asset == it.asset and p.side != it.side:
-                return False, f"wallet {it.wallet} ha già {p.side} su {p.asset}"
-        if it.strategy == "RUSH":                      # la corsa ha un budget suo, deciso a priori
+                return False, f"wallet {it.wallet} already has {p.side} on {p.asset}"
+        if it.strategy == "RUSH":                      # the rush has its own budget, decided upfront
             probs = self.market_problems(snap, now)
-            return (False, "mercato non idoneo: " + ", ".join(probs)) if probs else (True, "ok")
+            return (False, "market not suitable: " + ", ".join(probs)) if probs else (True, "ok")
         if self.store.daily_pnl(now) <= -c["daily_loss_cap_usd"]:
-            return False, "stop giornaliero raggiunto"
+            return False, "daily loss cap reached"
         if len([p for p in open_pos if p.strategy != "RUSH"]) >= c["max_open_positions"]:
-            return False, "troppe posizioni aperte"
+            return False, "too many open positions"
         if it.margin > c["max_margin_per_trade_usd"]:
-            return False, "margine oltre il limite"
+            return False, "margin above the limit"
         committed = sum(p.margin for p in open_pos if p.strategy != "RUSH")
         if committed + it.margin > c["trading_budget_usd"]:
-            return False, "budget di trading esaurito"
+            return False, "trading budget exhausted"
         probs = self.market_problems(snap, now)
         if probs:
-            return False, "mercato non idoneo: " + ", ".join(probs)
+            return False, "market not suitable: " + ", ".join(probs)
         return True, "ok"

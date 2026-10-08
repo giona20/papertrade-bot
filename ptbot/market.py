@@ -1,8 +1,8 @@
-"""Dati di mercato.
+"""Market data.
 
-HyperliquidMarket legge il BBO (miglior bid/ask) da cui Papertrade calcola il prezzo
-(BBO mid), più mark/oracle per i controlli di divergenza e le candele 1m per volatilità
-e breakout. SimMarket genera prezzi finti per i test offline.
+HyperliquidMarket reads the BBO (best bid/ask) that Papertrade prices from (BBO mid), plus
+mark/oracle for divergence checks and 1m candles for volatility and breakouts.
+SimMarket generates fake prices for offline tests.
 """
 from __future__ import annotations
 

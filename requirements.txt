@@ -1,4 +1,4 @@
 pyyaml>=6.0
 requests>=2.31
-tzdata>=2024.1   # fusi orari (necessario su Windows)
-web3>=6.0        # serve solo con protocol_source: onchain
+tzdata>=2024.1   # time zones (required on Windows)
+web3>=6.0        # needed for on-chain reads (protocol_source: onchain, live dashboard)

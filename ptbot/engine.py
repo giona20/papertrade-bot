@@ -1,4 +1,4 @@
-"""Esecuzione ordini + ciclo principale."""
+"""Order execution + main loop."""
 from __future__ import annotations
 
 import time
@@ -11,8 +11,8 @@ from .strategies import PHASE_TEXT, RegimeDetector, RushTracker, StrategyBook, c
 
 
 class DryRunExecutor:
-    """Simula aperture/chiusure al BBO mid, come fa Papertrade. In SimProtocol regola davvero
-    contro l'LP simulata (coda, emissioni); con il protocollo reale stima emissioni e trattenuta."""
+    """Simulates opens/closes at the BBO mid, like Papertrade does. With SimProtocol it actually settles
+    against the simulated LP (queue, emissions); with the real protocol it estimates emissions and haircut."""
 
     def __init__(self, protocol, haircut: HaircutModel, store: Store, cfg: dict):
         self.protocol = protocol
@@ -34,15 +34,15 @@ class DryRunExecutor:
     def close(self, p: Position, price: float, now: float, why: str) -> Position:
         mv = p.move(price)
         raw = p.margin * p.leverage * mv
-        if why == "liquidazione":
+        if why == "liquidation":
             raw = -p.margin
         p.exit, p.closed_ts, p.status, p.close_reason = price, now, "closed", why
         if raw < 0:
             loss = min(-raw, p.margin)
-            liq = why == "liquidazione"
+            liq = why == "liquidation"
             if self.protocol.simulated:
                 minted = self.protocol.settle_loss(loss, liquidation=liq)
-            else:   # docs: liquidazioni = margine pieno; chiusure in perdita solventi = perdita − 2%
+            else:   # docs: liquidations = full margin; solvent losing closes = loss − 2%
                 basis = loss if (liq or self.last_queue > 0) else loss * (1 - self.cfg["thresholds"]["loss_fee_lp"])
                 minted = basis * self.last_emission
             p.pnl, p.paper_minted = -loss, minted or 0.0
@@ -50,16 +50,16 @@ class DryRunExecutor:
             if self.protocol.simulated:
                 h = 1 - scale_for(mv, *self.true_hc)
                 paid, queued = self.protocol.settle_win(raw, h)
-                self.h.add(mv, h)                        # in sim la trattenuta si "osserva" automaticamente
+                self.h.add(mv, h)                        # in sim the haircut is "observed" automatically
                 self.store.haircut_obs(now, mv, h)
             else:
-                h = self.h.estimate(mv)                  # stima: la reale va registrata con `calib add`
+                h = self.h.estimate(mv)                  # estimate: record the real one with `calib add`
                 queued = 0.0
             p.pnl, p.haircut, p.queued_usd = raw * (1 - h), h, queued
         f = self.cfg.get("fees", {})
         r, base = f.get("frontend_rate", 0.0), f.get("frontend_base", "margin")
-        if why == "liquidazione" and not f.get("charged_on_liquidation", False):
-            r = 0.0                                       # fee presa alla chiusura: sulle liquidazioni no (da verificare)
+        if why == "liquidation" and not f.get("charged_on_liquidation", False):
+            r = 0.0                                       # fee taken on close: not on liquidations (to be verified)
         if base == "margin":
             p.pnl -= r * p.margin
         elif base == "notional":
@@ -71,13 +71,13 @@ class DryRunExecutor:
 
 
 class LiveExecutor(DryRunExecutor):
-    """Ordini veri sul contratto. Da completare al lancio con ABI e nomi funzione ufficiali."""
+    """Real orders on the contract. Requires the open/close functions (relayer-only until phase 2)."""
 
     def open(self, it, sn, now):
-        raise NotImplementedError("Live non ancora collegato: servono ABI e funzioni open/close ufficiali (10/10).")
+        raise NotImplementedError("Live execution not wired yet: needs the official open/close functions (phase 2).")
 
     def close(self, p, price, now, why):
-        raise NotImplementedError("Live non ancora collegato.")
+        raise NotImplementedError("Live execution not wired yet.")
 
 
 class Engine:
@@ -86,7 +86,7 @@ class Engine:
         self.cfg, self.clock, self.market, self.protocol = cfg, clock, market, protocol
         self.ex, self.risk, self.store, self.alert, self.book = executor, risk, store, alerter, book
         self.dry = executor if type(executor) is DryRunExecutor else DryRunExecutor(protocol, book.h, store, cfg)
-        self.pending_open: list = []          # (pronto_ts, intent) in attesa del relayer
+        self.pending_open: list = []          # (ready_ts, intent) waiting for the relayer
         self.supply_hist = deque()
         self.rush = RushTracker(cfg, book.launch_ts)
         self.rush_was_active = False
@@ -101,7 +101,7 @@ class Engine:
         self.stopped = False
         self.was_drain = False
 
-    # ---------- ciclo veloce: gestione posizioni ----------
+    # ---------- fast loop: position management ----------
     def delay(self, margin: float, lev: float) -> float:
         c = self.cfg.get("congestion", {})
         if self.phase not in c.get("enabled_phases", []):
@@ -113,7 +113,7 @@ class Engine:
     def executor(self):
         return self.ex if (self.cfg["mode"] == "live" and (self.phase or 0) >= 2) else self.dry
 
-    # ---------- ciclo veloce: gestione posizioni ----------
+    # ---------- fast loop: position management ----------
     def fast(self, now: float) -> None:
         self.snaps = self.market.snapshot(now)
         if self.risk.kill_requested():
@@ -122,27 +122,27 @@ class Engine:
             self.stopped = True
             return
         ttl = self.cfg.get("congestion", {}).get("intent_ttl_s", 3600)
-        for ready, it in list(self.pending_open):       # aperture confermate dal relayer
+        for ready, it in list(self.pending_open):       # opens confirmed by the relayer
             if ready - getattr(it, "_sent", ready) > ttl and now >= getattr(it, "_sent", now) + ttl:
                 self.pending_open.remove((ready, it))
                 if it.strategy == "RUSH":
                     self.rush.spent -= it.margin
-                self.alert.send(now, f"Intent SCADUTO (oltre 1h in attesa): {it.strategy} {it.asset} {it.side}", "WARN", self.quiet)
+                self.alert.send(now, f"Intent EXPIRED (pending over 1h): {it.strategy} {it.asset} {it.side}", "WARN", self.quiet)
                 continue
             sn = self.snaps.get(it.asset)
             if ready <= now and sn:
                 self.pending_open.remove((ready, it))
                 p = self.executor().open(it, sn, now)
                 self.open.append(p)
-                self.alert.send(now, f"ESEGUITA #{p.id} {p.strategy} {p.asset} {p.side} entry {p.entry:.4f}",
+                self.alert.send(now, f"FILLED #{p.id} {p.strategy} {p.asset} {p.side} entry {p.entry:.4f}",
                                 "INFO", self.quiet)
         for p in list(self.open):
             sn = self.snaps.get(p.asset)
             if not sn:
                 continue
             mv = p.move(sn.mid)
-            if -mv >= p.liq_move:                        # la liquidazione ha priorità su tutto
-                self._close(p, sn.mid, now, "liquidazione")
+            if -mv >= p.liq_move:                        # liquidation takes priority over everything
+                self._close(p, sn.mid, now, "liquidation")
                 continue
             if p.pending_close_ts is not None:
                 if now >= p.pending_close_ts:
@@ -154,22 +154,22 @@ class Engine:
             elif mv >= p.tp_move:
                 why = "take profit"
             elif now - p.opened_ts >= p.max_hold_min * 60:
-                why = "tempo massimo"
+                why = "max hold time"
             if why:
                 self.request_close(p, sn.mid, now, why)
 
     def request_close(self, p, price, now, why):
         dl = self.delay(p.margin, p.leverage)
         if dl > 0:
-            p.pending_close_ts, p.pending_why = now + dl, why + " (ritardata)"
+            p.pending_close_ts, p.pending_why = now + dl, why + " (delayed)"
             if self.phase == 1:
-                self.alert.send(now, f"SEGNALE MANUALE: CHIUDI #{p.id} [wallet {p.wallet}] {p.asset} {p.side} ({why})",
+                self.alert.send(now, f"MANUAL SIGNAL: CLOSE #{p.id} [wallet {p.wallet}] {p.asset} {p.side} ({why})",
                                 "TRADE", self.quiet)
         else:
             self._close(p, price, now, why)
 
     def queue_guard(self, now, st):
-        """Chiude in anticipo i trade in profitto quando l'LP rischia di non poterli pagare."""
+        """Closes winning trades early when the LP risks not being able to pay them."""
         qg = self.cfg.get("queue_guard", {})
         if not qg.get("enabled"):
             return
@@ -191,27 +191,27 @@ class Engine:
         dl = max(self.delay(w[0].margin, w[0].leverage) for w in winners)
         reason = None
         if st.queue_usd > 0:
-            if self.regime.queue_growing:   # coda in crescita: chiudi solo chi è già a metà strada dal TP
+            if self.regime.queue_growing:   # growing queue: close only trades already halfway to the TP
                 winners = [w for w in winners if w[3] >= 0.5 * w[0].tp_move]
-                reason = "coda FIFO in crescita: chiudere ora = posto prima in fila"
+                reason = "FIFO queue growing: closing now = earlier spot in line"
         elif free < qg["coverage_min"] * exposure:
-            reason = f"copertura bassa (LP libera ${free:,.0f} vs profitti aperti ${exposure:,.0f})"
+            reason = f"low coverage (free LP ${free:,.0f} vs open profits ${exposure:,.0f})"
         elif rate < 0 and (free - exposure) / -rate < dl + qg["buffer_s"]:
-            reason = f"LP in calo di ${-rate * 60:,.0f}/min: non coprirebbe i profitti prima della conferma"
+            reason = f"LP falling ${-rate * 60:,.0f}/min: would not cover profits before confirmation"
         if reason:
             for p, price, net, _ in winners:
-                self.request_close(p, price, now, "anticipo coda: " + reason)
+                self.request_close(p, price, now, "queue guard: " + reason)
 
     def _close(self, p, price, now, why):
         self.executor().close(p, price, now, why)
         if p.strategy == "RUSH":
             self.rush.minted += p.paper_minted
-            self.rush.lost -= p.pnl                      # costo netto: perdite meno profitti delle gambe vincenti
+            self.rush.lost -= p.pnl                      # net cost: losses minus profits of the winning legs
         self.open.remove(p)
         extra = f", PAPER +{p.paper_minted:,.0f}" if p.paper_minted else ""
-        extra += f", in coda ${p.queued_usd:,.2f}" if p.queued_usd else ""
-        extra += f", trattenuta {p.haircut:.0%}" if p.haircut is not None else ""
-        self.alert.send(now, f"CHIUSA #{p.id} {p.strategy} {p.asset} {p.side} {why}: PnL ${p.pnl:+.2f}{extra}",
+        extra += f", queued ${p.queued_usd:,.2f}" if p.queued_usd else ""
+        extra += f", haircut {p.haircut:.0%}" if p.haircut is not None else ""
+        self.alert.send(now, f"CLOSED #{p.id} {p.strategy} {p.asset} {p.side} {why}: PnL ${p.pnl:+.2f}{extra}",
                         "TRADE", self.quiet)
 
     def close_all(self, now, why):
@@ -220,17 +220,17 @@ class Engine:
             if sn:
                 self._close(p, sn.mid, now, why)
 
-    # ---------- ciclo lento: regime, strategie, scheda ----------
+    # ---------- slow loop: regime, strategies, action card ----------
     def slow(self, now: float) -> None:
         ph = current_phase(self.cfg, now, self.book.launch_ts)
         if ph != self.phase:
-            self.alert.send(now, "Cambio fase → " + PHASE_TEXT.get(ph, ""), "REGIME", self.quiet)
+            self.alert.send(now, "Phase change → " + PHASE_TEXT.get(ph, ""), "REGIME", self.quiet)
             if self.cfg["mode"] == "live" and ph < 2:
-                self.alert.send(now, "Live disattivato finché il contratto non è aperto (fase 2): solo segnali manuali.",
+                self.alert.send(now, "Live mode disabled until the contract opens (phase 2): manual signals only.",
                                 "WARN", self.quiet)
             self.phase = ph
         st = self.protocol.state(now)
-        self.supply_hist.append((now, st.paper_supply))      # ritmo di conio per la diluizione
+        self.supply_hist.append((now, st.paper_supply))      # mint rate for dilution
         while len(self.supply_hist) > 2 and self.supply_hist[0][0] < now - 86400:
             self.supply_hist.popleft()
         t0, s0 = self.supply_hist[0]
@@ -239,16 +239,16 @@ class Engine:
             e.last_emission, e.last_queue = st.emission_per_usd, st.queue_usd
         reg = self.regime.update(st)
         if reg != self.last_regime:
-            self.alert.send(now, f"Cambio regime: {self.last_regime} → {reg}", "REGIME", self.quiet)
+            self.alert.send(now, f"Regime change: {self.last_regime} → {reg}", "REGIME", self.quiet)
             self.last_regime = reg
         if self.regime.drain and not self.was_drain:
-            self.alert.send(now, "DRENAGGIO: LP effettiva scesa oltre la soglia dal massimo", "ALERT", self.quiet)
+            self.alert.send(now, "DRAIN: effective LP fell past the threshold from its peak", "ALERT", self.quiet)
         self.was_drain = self.regime.drain
         self.rush.update(now, st)
         self.queue_guard(now, st)
         rush_on = self.rush.active(now) and self.phase >= 1
         if self.rush_was_active and not rush_on:
-            self.alert.send(now, f"CORSA FINITA: {self.rush.end_reason}. Passo alle strategie normali.", "REGIME", self.quiet)
+            self.alert.send(now, f"RUSH OVER: {self.rush.end_reason}. Switching to normal strategies.", "REGIME", self.quiet)
         self.rush_was_active = rush_on
         lost, minted = self.store.db.execute(
             "SELECT COALESCE(SUM(-pnl),0), COALESCE(SUM(paper_minted),0) FROM trades WHERE status='closed'").fetchone()
@@ -256,31 +256,31 @@ class Engine:
                                            self.phase, (lost, minted))
         rc = self.rush.card(now, st) if self.phase >= 1 else []
         if rc:
-            lines = [("S1 finestra di lancio: in pausa durante la corsa" if l.startswith("S1 ") else
-                      "S3 farming: in pausa durante la corsa" if l.startswith("S3 ") else l)
+            lines = [("S1 launch window: paused during the rush" if l.startswith("S1 ") else
+                      "S3 farming: paused during the rush" if l.startswith("S3 ") else l)
                      for l in card.split("\n")] if rush_on else card.split("\n")
             card = "\n".join(lines[:2] + rc + lines[2:])
-        if rush_on:                                       # annulla ordini che verrebbero confermati a finestra chiusa
+        if rush_on:                                       # cancel orders that would confirm after the window closes
             eta2 = min(self.rush.eta(self.rush.target_lp(), st),
                        self.cfg["rush"]["max_minutes"] * 60 - (now - self.book.launch_ts))
             for ready, it in list(self.pending_open):
                 if it.strategy == "RUSH" and eta2 < (ready - now) + self.cfg["rush"]["cancel_buffer_s"]:
                     self.pending_open.remove((ready, it))
                     self.rush.spent -= it.margin
-                    self.alert.send(now, f"SEGNALE MANUALE: ANNULLA ordine in attesa {it.asset} {it.side} "
-                                         f"(la finestra della corsa chiude tra {eta2 / 60:.0f} min)", "TRADE", self.quiet)
+                    self.alert.send(now, f"MANUAL SIGNAL: CANCEL pending order {it.asset} {it.side} "
+                                         f"(rush window closes in {eta2 / 60:.0f} min)", "TRADE", self.quiet)
         if self.protocol.simulated:
             if acts["stake"] and st.my_paper > 0 and self.phase >= 1:
                 self.protocol.stake_all()
             if acts["claim"]:
                 got = self.protocol.claim()
-                self.alert.send(now, f"Claim ricompense staking: ${got:,.2f}", "INFO", self.quiet)
+                self.alert.send(now, f"Claim staking rewards: ${got:,.2f}", "INFO", self.quiet)
         self.store.snapshot(st, reg, card)
         if card.split("\n", 1)[1] != self.last_card.split("\n", 1)[-1] and not self.quiet:
             print("\n" + card + "\n")
         self.last_card = card
         busy = self.open + [i for _, i in self.pending_open]
-        if rush_on:      # durante la corsa niente trade simmetrici: le chiusure in profitto restano bloccate
+        if rush_on:      # no symmetric trades during the rush: profitable closes stay stuck
             m, lv = self.cfg["rush"]["margin_usd"], self.cfg["rush"]["leverage"]
             new = self.rush.intents(now, st, self.snaps, busy, self.delay(m, lv))
         else:
@@ -291,17 +291,17 @@ class Engine:
             if not ok:
                 if it.strategy == "RUSH":
                     self.rush.spent -= it.margin
-                self.alert.send(now, f"Scartato {it.strategy} {it.asset} {it.side}: {why}", "INFO", True)
+                self.alert.send(now, f"Rejected {it.strategy} {it.asset} {it.side}: {why}", "INFO", True)
                 continue
             if it.group:
                 self.book.opened_events.add(it.group)
             busy.append(it)
             it._sent = now
             self.pending_open.append((now + self.delay(it.margin, it.leverage), it))
-            tag = "SEGNALE MANUALE (papertrade.xyz)" if self.phase == 1 else "ORDINE"
-            tp_txt = "nessun TP, lascia liquidare" if it.strategy == "RUSH" else f"TP {it.tp_move:.2%}"
-            self.alert.send(now, f"{tag}: [wallet {it.wallet}] APRI {it.strategy} {it.asset} {it.side} margine ${it.margin} "
-                                 f"leva {it.leverage:.0f}x, {tp_txt}, liq {liq_distance(it.leverage, self.cfg['leverage']['liq_buffer']):.2%} ({it.reason})",
+            tag = "MANUAL SIGNAL (papertrade.xyz)" if self.phase == 1 else "ORDER"
+            tp_txt = "no TP, let it liquidate" if it.strategy == "RUSH" else f"TP {it.tp_move:.2%}"
+            self.alert.send(now, f"{tag}: [wallet {it.wallet}] OPEN {it.strategy} {it.asset} {it.side} margin ${it.margin} "
+                                 f"leverage {it.leverage:.0f}x, {tp_txt}, liq {liq_distance(it.leverage, self.cfg['leverage']['liq_buffer']):.2%} ({it.reason})",
                             "TRADE", self.quiet)
 
     def run(self, duration_s: float | None = None) -> None:
@@ -317,8 +317,8 @@ class Engine:
                 if now - self.last_slow >= interval:
                     self.slow(now)
                     self.last_slow = now
-            except Exception as e:  # rete, RPC, API: non si ferma, segnala
-                self.alert.send(now, f"Errore: {e}", "WARN", self.quiet)
+            except Exception as e:  # network, RPC, API: keep going, report it
+                self.alert.send(now, f"Error: {e}", "WARN", self.quiet)
                 if not self.protocol.simulated:
                     time.sleep(5)
             self.clock.sleep(fast_s)

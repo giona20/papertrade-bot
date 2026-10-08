@@ -1,7 +1,7 @@
-# Eventi per la strategia S2. Orari in ora di Roma, formato "AAAA-MM-GG HH:MM".
-# Controlla sempre la data ufficiale sul calendario economico prima di inserirla.
+# Events for strategy S2. Times in Rome time, format "YYYY-MM-DD HH:MM".
+# Always check the official date on an economic calendar before adding one.
 events:
-  # - name: "CPI USA"
+  # - name: "US CPI"
   #   time: "2026-10-XX 14:30"
   #   assets: [BTC, ETH]
-  #   expected_move_bps: 60     # movimento atteso in punti base (60 = 0,60%)
+  #   expected_move_bps: 60     # expected move in basis points (60 = 0.60%)

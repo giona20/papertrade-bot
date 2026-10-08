@@ -1,13 +1,13 @@
-# ambiente e dati locali
+# local environment and data
 .venv/
 __pycache__/
 *.pyc
 data/
 KILL
 
-# output dei comandi probe / abi-recover (contengono i tuoi saldi)
+# probe / abi-recover output (contains your balances)
 abi/probe_*.json
 abi/selectors_*.txt
 
-# configurazione personale: copia config.yaml in config.local.yaml e usa --config config.local.yaml
+# personal configuration: copy config.yaml to config.local.yaml and use --config config.local.yaml
 config.local.yaml

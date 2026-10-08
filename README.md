@@ -1,24 +1,19 @@
-# Papertrade Bot (locale)
+# Papertrade Bot
 
-Bot di monitoraggio e segnali per Papertrade (perp sintetici su Hyperliquid, lancio 10/10/2026).
+A local monitoring and signal bot for [Papertrade](https://papertrade.xyz): synthetic perpetuals on Hyperliquid with up to 1000x leverage, where traders face a single LP and losses mint the PAPER token.
 
-## Configurazione personale
+The bot reads the protocol state on-chain and Hyperliquid prices, classifies the protocol into a regime, and tells you what to do: open delta-neutral pairs to mint PAPER cheaply, cancel, close early before the payout queue, stake, claim. In phase 1 (frontend-only trading) it gives manual signals; from phase 2 it can execute.
 
-`config.yaml` contiene solo indirizzi pubblici del protocollo. I tuoi dati (wallet, Telegram, budget) vanno in una copia locale, esclusa da git:
+- **GUIDE.md**: how the protocol works, every data point, every strategy, the launch procedure.
+- **INSTALL_AND_TEST.md**: installation and the tests to run, in order.
 
-```bash
-cp config.yaml config.local.yaml       # Windows: copy config.yaml config.local.yaml
-# compila wallets.B/C.address, onchain.my_address, alerts.telegram_*
-python run.py run --config config.local.yaml
-```
+> **Disclaimer.** Experimental software, not financial advice. The Papertrade contracts are unverified and upgradeable: function names and curve parameters are reconstructed from bytecode and on-chain data and may be wrong or change. Only use capital you can afford to lose.
 
-Attenzione: `dashboard.py` legge `config.yaml`; con la config locale usa `python dashboard.py --config config.local.yaml`.
+## Installation (virtual environment)
 
-## Installazione (ambiente virtuale)
+Requires Python 3.9+ (Anaconda's is fine). Check with `python --version`.
 
-Requisito: Python 3.9 o superiore (va bene quello di Anaconda). Controlla con `python --version`.
-
-Estrai lo zip in una cartella nuova, apri un terminale dentro la cartella del bot (quella con `run.py`) e segui i passi per il tuo sistema.
+Extract the zip into a new folder (or clone the repo), open a terminal in the folder that contains `run.py`, and follow the steps for your system.
 
 ### Windows — PowerShell
 ```powershell
@@ -27,9 +22,9 @@ python -m venv .venv
 pip install -r requirements.txt
 python run.py sim --hours 24
 ```
-Se `Activate.ps1` viene bloccato, esegui una volta `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, oppure usa il Prompt dei comandi (sotto).
+If `Activate.ps1` is blocked, run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once, or use cmd (below).
 
-### Windows — Prompt dei comandi (cmd)
+### Windows — Command Prompt (cmd)
 ```bat
 python -m venv .venv
 .venv\Scripts\activate.bat
@@ -45,56 +40,78 @@ pip install -r requirements.txt
 python run.py sim --hours 24
 ```
 
-### Ogni volta che apri un terminale nuovo
-L'ambiente va riattivato prima di usare il bot:
+### Every time you open a new terminal
+Reactivate the environment before using the bot:
 - PowerShell: `.venv\Scripts\Activate.ps1`
 - cmd: `.venv\Scripts\activate.bat`
 - Mac/Linux: `source .venv/bin/activate`
 
-Quando è attivo, la riga del terminale inizia con `(.venv)`. Per uscire: `deactivate`.
+When active, the prompt starts with `(.venv)`. To leave: `deactivate`.
 
-## Uso
+Optional on Windows: `setup.bat` installs everything with a double-click; `start_bot.bat`, `simulation.bat` and `dashboard.bat` run without activating the environment by hand.
+
+## Personal configuration
+
+`config.yaml` only contains public protocol addresses. Put your own data (wallets, Telegram, budgets) in a local copy that git ignores:
+
 ```bash
-python run.py sim --hours 72           # simulazione + report
-python run.py run                      # bot con la configurazione di config.yaml
-python dashboard.py                    # dashboard locale: http://localhost:8765 (secondo terminale)
-python dashboard.py --db data/sim.db   # dashboard sui dati della simulazione
-python run.py status                   # scheda azioni e posizioni aperte
-python run.py audit --hours 24         # verifica indipendente di conio, trattenuta e liquidazioni
-python run.py scenarios --seeds 3 --hours 12   # prova la config su 5 scenari di mercato
-python run.py sweep --param rush.pair_target_minutes --values 5,15,30   # confronto parametri
-python run.py probe                    # legge il contratto Exchange anche senza ABI (getter probabili)
-python run.py check-onchain            # dall'8/10: verifica lettura contratto
-python run.py calib add --move 0.01 --gross 14.25 --net 12.10           # trattenuta osservata
-python run.py delay add --seconds 45 --notional 10000                   # ritardi relayer
-python run.py test-alert               # prova Telegram
+cp config.yaml config.local.yaml       # Windows: copy config.yaml config.local.yaml
+# fill in wallets.B/C.address, onchain.my_address, alerts.telegram_*; set protocol_source: onchain
+python run.py check-onchain --config config.local.yaml
+python run.py run --config config.local.yaml
+```
+
+## Usage
+```bash
+python run.py sim --hours 72           # simulation + report
+python run.py run                      # run the bot with config.yaml
+python run.py status                   # action card and open positions
+python dashboard.py                    # local dashboard: http://localhost:8765 (second terminal)
+python dashboard.py --db data/sim.db   # dashboard on simulation data
+python run.py audit --hours 24         # independent check of minting, haircut and liquidations
+python run.py scenarios --seeds 3 --hours 12   # test the config across 5 market scenarios
+python run.py sweep --param haircut.target_max --values 0.25,0.35,0.45   # compare parameter values
+python run.py check-onchain            # verify on-chain reads
+python run.py probe                    # read the Exchange without an ABI (likely getters)
+python run.py abi-recover              # list contract function selectors and known names
+python run.py call "exchange:instruments(uint32)" 0   # raw call, prints every returned value
+python run.py calib add --move 0.01 --gross 14.25 --net 6.40   # record an observed haircut
+python run.py delay add --seconds 45 --notional 10000          # record relayer delays
+python run.py test-alert               # test Telegram
 python run.py kill  /  python run.py unkill
 ```
 
-## Dashboard Streamlit (opzionale)
+## Streamlit dashboard (optional)
 
-Oltre alla dashboard locale senza dipendenze (`python dashboard.py`), c'è una versione Streamlit:
+Besides the dependency-free local dashboard (`python dashboard.py`), there is a Streamlit version:
 
 ```bash
 pip install -r requirements-streamlit.txt
-streamlit run streamlit_dashboard.py                               # database in config.yaml
-streamlit run streamlit_dashboard.py -- --db data/sim.db           # risultati di una simulazione
-streamlit run streamlit_dashboard.py -- --config config.local.yaml # con la tua config locale
+streamlit run streamlit_dashboard.py                               # database from config.yaml
+streamlit run streamlit_dashboard.py -- --db data/sim.db           # simulation results
+streamlit run streamlit_dashboard.py -- --config config.local.yaml # your local config
 ```
 
-Si apre su http://localhost:8501 e si aggiorna ogni 5 secondi (`-- --refresh 10` per cambiarlo). Mostra gli stessi dati: regime, metriche, scheda azioni, grafico LP/coda, posizioni, risultati per strategia, trade e registro.
+It opens at http://localhost:8501. Pick the data source in the sidebar:
+- **Live on-chain**: reads the Papertrade contracts and Hyperliquid prices directly (LP, queue, emission, PAPER, deposits, OI and caps per market). You can type a wallet to see its balance, queue and PAPER. This is the mode that works on **Streamlit Cloud**, where there is no bot database.
+- **Local bot**: your bot's database (action card, positions, trades, log).
 
-## Documentazione
-- **INSTALLAZIONE_E_TEST.md**: test in ordine dal pre-lancio al lancio.
-- **GUIDA.md**: ogni dato, strategia e la procedura del giorno di lancio.
+### Deploying on Streamlit Cloud
+share.streamlit.io → New app → this repository → main file `streamlit_dashboard.py`. It opens in live mode and redeploys on every `git push`.
 
-## Problemi comuni
-- `ModuleNotFoundError`: l'ambiente non è attivo → riattivalo (vedi sopra).
+## Project layout
+- `run.py`: command-line entry point (bot, simulation, tests, on-chain tools)
+- `ptbot/market.py`: Hyperliquid prices (BBO, oracle, candles) and the price simulator
+- `ptbot/protocol.py`: ABI-free on-chain reader and simulated LP with FIFO queue
+- `ptbot/live.py`: public live snapshot of the protocol (used by the Streamlit dashboard)
+- `ptbot/haircut.py`: haircut curve and calibration
+- `ptbot/strategies.py`: regimes, strategies, rush mode, action card
+- `ptbot/engine.py`: execution (dry run / live), relayer delays, queue guard, main loop
+- `ptbot/infra.py`: SQLite store, Telegram alerts, risk checks
+- `dashboard.py` / `streamlit_dashboard.py`: dashboards
+- `config.yaml`: configuration (public addresses only) · `events.yaml`: event calendar for S2
+
+## Common problems
+- `ModuleNotFoundError`: the environment isn't active → reactivate it (see above).
 - `No time zone found with key Europe/Rome`: `pip install tzdata`.
-- `SyntaxError` dopo un aggiornamento: hai estratto sopra la versione vecchia → estrai in una cartella nuova e rifai l'installazione.
-
-Facoltativo su Windows: `setup.bat` fa l'installazione con un doppio clic, e `avvia_bot.bat`, `simulazione.bat`, `dashboard.bat` avviano tutto senza attivare l'ambiente a mano.
-
-## Avvertenze
-
-Software sperimentale, non un consiglio finanziario. I contratti Papertrade non sono verificati: nomi delle funzioni e parametri della curva sono ricostruiti dal bytecode e possono cambiare (i contratti sono aggiornabili). Usa solo capitale che puoi perdere.
+- `SyntaxError` after an update: you extracted over an old version → extract into a new folder and reinstall.

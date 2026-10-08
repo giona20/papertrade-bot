@@ -1,10 +1,10 @@
-"""Dashboard locale senza dipendenze esterne.
+"""Local dashboard with no external dependencies.
 
-  python dashboard.py                      # legge il database in config.yaml
-  python dashboard.py --db data/sim.db     # dati di una simulazione
+  python dashboard.py                      # reads the database set in config.yaml
+  python dashboard.py --db data/sim.db     # data from a simulation
   python dashboard.py --port 8765
 
-Poi apri http://localhost:8765 nel browser. Si aggiorna da sola ogni 5 secondi.
+Then open http://localhost:8765 in your browser. It refreshes every 5 seconds.
 """
 from __future__ import annotations
 
@@ -33,15 +33,15 @@ def rows(con, sql, args=()):
 
 def state(db_path: str) -> dict:
     if not Path(db_path).exists():
-        return {"error": f"Database non trovato: {db_path}. Avvia il bot o una simulazione."}
+        return {"error": f"Database not found: {db_path}. Start the bot or a simulation."}
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     try:
         snaps = rows(con, "SELECT * FROM snapshots ORDER BY ts DESC LIMIT 1")
         if not snaps:
-            return {"error": "Il bot non ha ancora registrato uno stato. Riprova tra un minuto."}
+            return {"error": "The bot has not recorded a state yet. Try again in a minute."}
         last = snaps[0]
         hist = rows(con, "SELECT ts, eff_lp, queue, emission FROM snapshots ORDER BY ts")
-        step = max(1, len(hist) // 400)              # al massimo ~400 punti nel grafico
+        step = max(1, len(hist) // 400)              # at most ~400 points in the chart
         hist = hist[::step] + ([hist[-1]] if hist and hist[-1] is not hist[::step][-1] else [])
         open_pos = rows(con, "SELECT id, strategy, asset, side, margin, leverage, entry, opened_ts, grp, reason "
                              "FROM trades WHERE status='open' ORDER BY id DESC")
@@ -53,7 +53,7 @@ def state(db_path: str) -> dict:
         trades = rows(con, "SELECT id, strategy, asset, side, margin, leverage, entry, exit, pnl, paper_minted, "
                            "haircut, close_reason, closed_ts FROM trades WHERE status='closed' "
                            "ORDER BY closed_ts DESC LIMIT 30")
-        events = rows(con, "SELECT ts, level, msg FROM events WHERE level!='INFO' OR msg NOT LIKE 'Scartato%' "
+        events = rows(con, "SELECT ts, level, msg FROM events WHERE level!='INFO' OR msg NOT LIKE 'Rejected%' "
                            "ORDER BY ts DESC LIMIT 40")
         for t in open_pos:
             t["opened"] = hhmm(t.pop("opened_ts"))
@@ -69,14 +69,14 @@ def state(db_path: str) -> dict:
 
 
 PAGE = r"""<!doctype html>
-<html lang="it"><head><meta charset="utf-8">
+<html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Papertrade bot</title>
 <style>
 :root{--bg:#f6f4ef;--panel:#fff;--ink:#1d1c1a;--mute:#6f6b63;--line:#e3dfd6;
---insolvente:#9b2c2c;--bootstrap:#b7791f;--decadimento:#2b6cb0;--sweep:#276749;--pos:#276749;--neg:#9b2c2c}
+--insolvent:#9b2c2c;--bootstrap:#b7791f;--decay:#2b6cb0;--sweep:#276749;--pos:#276749;--neg:#9b2c2c}
 @media (prefers-color-scheme:dark){:root{--bg:#141413;--panel:#1d1c1a;--ink:#ecebe7;--mute:#9a968d;--line:#2e2c29;
---insolvente:#e05d5d;--bootstrap:#e2a33b;--decadimento:#5b9be0;--sweep:#4fb37a;--pos:#4fb37a;--neg:#e05d5d}}
+--insolvent:#e05d5d;--bootstrap:#e2a33b;--decay:#5b9be0;--sweep:#4fb37a;--pos:#4fb37a;--neg:#e05d5d}}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
 main{max-width:1200px;margin:0 auto;padding:20px}
@@ -98,53 +98,53 @@ th{color:var(--mute);font-weight:600;font-size:12px}
 svg{width:100%;height:180px;display:block}
 .foot{color:var(--mute);font-size:12px;text-align:right}
 </style></head><body><main>
-<div id="app"><p class="mute">Caricamento…</p></div>
+<div id="app"><p class="mute">Loading…</p></div>
 <div class="foot" id="foot"></div>
 </main>
 <script>
-const MEANING={INSOLVENTE:"L'LP non copre la coda: i profitti aspettano, le perdite coniano 100 PAPER per $1.",
-BOOTSTRAP:"LP sotto $2M: emissione massima, fase di accumulo PAPER.",
-DECADIMENTO:"LP tra $2M e $5M: emissione in lento calo, valuta PAPER in base all'APR.",
-SWEEP:"LP sopra $5M: ogni dollaro di guadagno extra va agli staker. Staking pieno."};
-const $=n=>n==null?"—":"$"+Number(n).toLocaleString("it-IT",{maximumFractionDigits:2});
-const num=(n,d=0)=>n==null?"—":Number(n).toLocaleString("it-IT",{maximumFractionDigits:d});
+const MEANING={INSOLVENT:"The LP doesn't cover the queue: profits wait, losses mint 100 PAPER per $1.",
+BOOTSTRAP:"LP below $2M: max emission, PAPER accumulation phase.",
+DECAY:"LP above $2M: emission slowly declining, value PAPER by its APR.",
+SWEEP:"LP above $5M: every extra dollar of LP gain goes to stakers. Stake fully."};
+const $=n=>n==null?"—":"$"+Number(n).toLocaleString("en-US",{maximumFractionDigits:2});
+const num=(n,d=0)=>n==null?"—":Number(n).toLocaleString("en-US",{maximumFractionDigits:d});
 const pct=n=>n==null?"—":(n*100).toFixed(1)+"%";
 const cls=n=>n>0?"pos":n<0?"neg":"";
 const esc=s=>String(s??"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
-function table(cols,data){if(!data.length)return '<p class="mute">Nessun dato.</p>';
+function table(cols,data){if(!data.length)return '<p class="mute">No data.</p>';
 return '<div class="tw"><table><tr>'+cols.map(c=>'<th>'+c[0]+'</th>').join('')+'</tr>'+
 data.map(r=>'<tr>'+cols.map(c=>'<td>'+c[1](r)+'</td>').join('')+'</tr>').join('')+'</table></div>'}
-function chart(h){if(h.length<2)return '<p class="mute">Servono più dati per il grafico.</p>';
+function chart(h){if(h.length<2)return '<p class="mute">Not enough data for the chart yet.</p>';
 const W=1000,H=180,P=6,xs=h.map(p=>p.ts),ys=h.flatMap(p=>[p.eff_lp,p.queue]);
 const x0=Math.min(...xs),x1=Math.max(...xs),y0=Math.min(0,...ys),y1=Math.max(1,...ys);
 const X=t=>P+(t-x0)/(x1-x0||1)*(W-2*P),Y=v=>H-P-(v-y0)/(y1-y0||1)*(H-2*P);
 const line=(k,c)=>'<polyline fill="none" stroke="'+c+'" stroke-width="2" points="'+h.map(p=>X(p.ts)+','+Y(p[k])).join(' ')+'"/>';
 const zero='<line x1="0" x2="'+W+'" y1="'+Y(0)+'" y2="'+Y(0)+'" stroke="var(--line)"/>';
-return '<svg viewBox="0 0 '+W+' '+H+'" preserveAspectRatio="none">'+zero+line('eff_lp','var(--decadimento)')+line('queue','var(--insolvente)')+'</svg>'+
-'<div class="mute" style="font-size:12px">— LP effettiva (blu) · — coda (rosso) · max '+$(y1)+'</div>'}
+return '<svg viewBox="0 0 '+W+' '+H+'" preserveAspectRatio="none">'+zero+line('eff_lp','var(--decay)')+line('queue','var(--insolvent)')+'</svg>'+
+'<div class="mute" style="font-size:12px">— effective LP (blue) · — queue (red) · max '+$(y1)+'</div>'}
 function render(d){const a=document.getElementById('app');
 if(d.error){a.innerHTML='<section><p>'+esc(d.error)+'</p></section>';return}
 const L=d.last,c='var(--'+L.regime.toLowerCase()+')';
 a.innerHTML=
-'<div class="hero" style="--c:'+c+'"><div class="r">'+L.regime+'</div><div class="m">'+(MEANING[L.regime]||'')+' · aggiornato '+L.time+'</div></div>'+
+'<div class="hero" style="--c:'+c+'"><div class="r">'+L.regime+'</div><div class="m">'+(MEANING[L.regime]||'')+' · updated '+L.time+'</div></div>'+
 '<div class="grid">'+
-[['LP effettiva',$(L.eff_lp)],['Coda',$(L.queue)+' <span class="mute" style="font-size:13px">('+num(L.queue_len)+')</span>'],
-['Emissione',num(L.emission,1)+' /$'],['Prezzo PAPER',L.paper_price==null?'n/d':'$'+Number(L.paper_price).toFixed(6)],
-['APR staking',pct(L.apr)],['PAPER tuoi',num((L.my_paper||0)+(L.my_staked||0))],['Ricompense',$(L.my_rewards)],['In coda per te',$(L.my_queued)]]
+[['Effective LP',$(L.eff_lp)],['Queue',$(L.queue)+' <span class="mute" style="font-size:13px">('+num(L.queue_len)+')</span>'],
+['Emission',num(L.emission,1)+' /$'],['PAPER price',L.paper_price==null?'n/a':'$'+Number(L.paper_price).toFixed(6)],
+['Staking APR',pct(L.apr)],['Your PAPER',num((L.my_paper||0)+(L.my_staked||0))],['Rewards',$(L.my_rewards)],['Queued for you',$(L.my_queued)]]
 .map(k=>'<div class="k"><div class="l">'+k[0]+'</div><div class="v">'+k[1]+'</div></div>').join('')+'</div>'+
-'<section><h2>Scheda azioni</h2><pre>'+esc(L.card)+'</pre></section>'+
-'<section><h2>LP effettiva e coda</h2>'+chart(d.hist)+'</section>'+
-'<div class="two"><section><h2>Posizioni aperte</h2>'+table([['#',r=>r.id],['Strat.',r=>r.strategy],['Asset',r=>r.asset],['Lato',r=>r.side],
-['Margine',r=>$(r.margin)],['Leva',r=>num(r.leverage)+'x'],['Entry',r=>num(r.entry,2)],['Dalle',r=>r.opened]],d.open)+'</section>'+
-'<section><h2>Risultati per strategia</h2>'+table([['Strat.',r=>r.strategy],['Trade',r=>r.n],['Vinti',r=>r.wins],
+'<section><h2>Action card</h2><pre>'+esc(L.card)+'</pre></section>'+
+'<section><h2>Effective LP and queue</h2>'+chart(d.hist)+'</section>'+
+'<div class="two"><section><h2>Open positions</h2>'+table([['#',r=>r.id],['Strat.',r=>r.strategy],['Asset',r=>r.asset],['Side',r=>r.side],
+['Margin',r=>$(r.margin)],['Leverage',r=>num(r.leverage)+'x'],['Entry',r=>num(r.entry,2)],['Since',r=>r.opened]],d.open)+'</section>'+
+'<section><h2>Results by strategy</h2>'+table([['Strat.',r=>r.strategy],['Trades',r=>r.n],['Won',r=>r.wins],
 ['PnL',r=>'<span class="'+cls(r.pnl)+'">'+$(r.pnl)+'</span>'],['PAPER',r=>num(r.paper)],
-['$/PAPER',r=>r.cost_per_paper==null?'—':Number(r.cost_per_paper).toFixed(4)],['In coda',r=>$(r.queued)]],d.strategies)+'</section></div>'+
-'<section><h2>Ultimi trade chiusi</h2>'+table([['#',r=>r.id],['Ora',r=>r.closed],['Strat.',r=>r.strategy],['Asset',r=>r.asset],['Lato',r=>r.side],
-['Leva',r=>num(r.leverage)+'x'],['PnL',r=>'<span class="'+cls(r.pnl)+'">'+$(r.pnl)+'</span>'],['PAPER',r=>num(r.paper_minted)],
-['Trattenuta',r=>r.haircut==null?'—':pct(r.haircut)],['Motivo',r=>esc(r.close_reason)]],d.trades)+'</section>'+
-'<section><h2>Registro</h2>'+table([['Ora',r=>r.time],['Livello',r=>'<span class="lv">'+r.level+'</span>'],['Messaggio',r=>esc(r.msg)]],d.events)+'</section>';
-document.getElementById('foot').textContent='Ultimo aggiornamento pagina: '+new Date().toLocaleTimeString('it-IT',{timeZone:'Europe/Rome'})+' (ora di Roma)';}
-async function tick(){try{render(await (await fetch('/api/state')).json())}catch(e){document.getElementById('foot').textContent='Bot o dashboard non raggiungibili: '+e}}
+['$/PAPER',r=>r.cost_per_paper==null?'—':Number(r.cost_per_paper).toFixed(4)],['Queued',r=>$(r.queued)]],d.strategies)+'</section></div>'+
+'<section><h2>Latest closed trades</h2>'+table([['#',r=>r.id],['Time',r=>r.closed],['Strat.',r=>r.strategy],['Asset',r=>r.asset],['Side',r=>r.side],
+['Leverage',r=>num(r.leverage)+'x'],['PnL',r=>'<span class="'+cls(r.pnl)+'">'+$(r.pnl)+'</span>'],['PAPER',r=>num(r.paper_minted)],
+['Haircut',r=>r.haircut==null?'—':pct(r.haircut)],['Reason',r=>esc(r.close_reason)]],d.trades)+'</section>'+
+'<section><h2>Log</h2>'+table([['Time',r=>r.time],['Level',r=>'<span class="lv">'+r.level+'</span>'],['Message',r=>esc(r.msg)]],d.events)+'</section>';
+document.getElementById('foot').textContent='Page last updated: '+new Date().toLocaleTimeString('en-GB',{timeZone:'Europe/Rome'})+' (Rome time)';}
+async function tick(){try{render(await (await fetch('/api/state')).json())}catch(e){document.getElementById('foot').textContent='Bot or dashboard unreachable: '+e}}
 tick();setInterval(tick,5000);
 </script></body></html>"""
 
@@ -180,7 +180,7 @@ if __name__ == "__main__":
     a = ap.parse_args()
     db = a.db or yaml.safe_load(Path(a.config).read_text())["db_path"]
     srv = ThreadingHTTPServer(("127.0.0.1", a.port), make_handler(db))
-    print(f"Dashboard su http://localhost:{a.port}  (database: {db})  —  Ctrl+C per chiudere")
+    print(f"Dashboard at http://localhost:{a.port}  (database: {db})  —  Ctrl+C to stop")
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
